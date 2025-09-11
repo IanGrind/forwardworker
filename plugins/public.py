@@ -104,7 +104,7 @@ async def stateful_message_handler(bot: Client, message: Message):
             bot_config = await db.get_bot(user_id, bot_id)
             if not bot_config: return await message.reply("⚠️ Error: Selected Fetcher Bot not found in database.")
             
-            async with CLIENT().client(bot_config) as temp_client:
+            async with CLIENT.client(bot_config) as temp_client:
                 from_title = (await temp_client.get_chat(from_chat)).title
         except PeerIdInvalid:
              return await message.reply("⚠️ **Access Error:** The selected Fetcher Bot/Userbot is not a member of the source channel. Please add it and try again.")
@@ -129,17 +129,17 @@ async def stateful_message_handler(bot: Client, message: Message):
         
     elif state_type == "awaiting_bot_token":
         temp.USER_STATES.pop(user_id, None)
-        if await CLIENT().add_bot(message):
+        if await CLIENT.add_bot(message):
             await show_settings_menu(bot, message, 'bots')
             
     elif state_type == "awaiting_user_session":
         temp.USER_STATES.pop(user_id, None)
-        if await CLIENT().add_session(message):
+        if await CLIENT.add_session(message):
             await show_settings_menu(bot, message, 'bots')
 
     elif state_type == "awaiting_worker_bot_token":
         temp.USER_STATES.pop(user_id, None)
-        if await CLIENT().add_worker_bot(message):
+        if await CLIENT.add_worker_bot(message):
             await show_settings_menu(bot, message, 'workers')
 
     elif state_type == "awaiting_channel_forward":
@@ -257,7 +257,6 @@ async def cb_select_workers(bot, query):
     except Exception as e:
         logger.error(f"Error in cb_select_workers: {e}", exc_info=True)
         await query.answer("An unexpected error occurred.", show_alert=True)
-
 
 async def show_final_confirmation(bot, query, session_id, num_workers):
     user_id = query.from_user.id
