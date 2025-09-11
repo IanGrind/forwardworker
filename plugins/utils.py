@@ -7,7 +7,7 @@ from uuid import uuid4
 from database import db
 from config import temp
 from translation import Translation
-from .test import parse_buttons
+from .parser import parse_buttons  # <-- FIXED IMPORT
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 STATUS = {}
