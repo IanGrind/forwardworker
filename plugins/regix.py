@@ -27,7 +27,6 @@ async def pub_(bot, cb):
 
     frwd_id = cb.data.split("_")[2]
     
-    # Retrieve the session_id from the map and clean up
     session_id = temp.SESSIONS_MAP.pop(frwd_id, None)
     if not session_id:
         return await cb.answer("This forward task has expired, please start over.", show_alert=True)
@@ -88,9 +87,25 @@ async def pub_(bot, cb):
             await stop_all(all_clients_to_stop, user_id, frwd_id, m)
             return
         
+        main_worker_client = None
         try:
             main_worker_client = await start_clone_bot(CLIENT.client(main_worker_config), main_worker_config)
             
+            # **FIX:** First, verify the main worker can access the target chat.
+            try:
+                await main_worker_client.get_chat(i.TO)
+            except Exception:
+                await msg_edit(m,
+                    "❌ **Error:** The **Main Worker Bot** could not access the target channel.\n\n"
+                    "Please ensure you have:\n"
+                    "1. Added the Main Worker Bot to the target channel.\n"
+                    "2. Promoted it with **'Add New Admins'** permission."
+                )
+                all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
+                await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+                return
+
+            await msg_edit(m, "Main worker is verifying other workers...")
             for worker_client in worker_clients:
                 try:
                     member = await main_worker_client.get_chat_member(i.TO, worker_client.me.id)
@@ -99,14 +114,15 @@ async def pub_(bot, cb):
                 except UserNotParticipant:
                     await main_worker_client.add_chat_members(i.TO, worker_client.me.id)
                     await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
-            
-            await main_worker_client.stop()
 
         except Exception as e:
             await msg_edit(m, f"Failed to add worker bots as admins: {e}", wait=True)
-            all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
+            all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
             await stop_all(all_clients_to_stop, user_id, frwd_id, m)
             return
+        finally:
+            if main_worker_client and main_worker_client.is_connected:
+                await main_worker_client.stop()
 
     if user_id not in temp.ACTIVE_TASKS: temp.ACTIVE_TASKS[user_id] = {}
     temp.ACTIVE_TASKS[user_id][frwd_id] = { "process": m, "details": {"type": "Forwarding", "from": from_title, "to": to_title} }
@@ -297,7 +313,7 @@ async def edit_progress(msg, sts, status):
 async def stop_all(clients, user_id, task_id, message_obj):
     for client in clients:
         try: 
-            if client.is_connected:
+            if client and client.is_connected:
                 await client.stop()
         except: pass
     if temp.ACTIVE_TASKS.get(user_id, {}).get(task_id): del temp.ACTIVE_TASKS[user_id][task_id]
@@ -338,7 +354,4 @@ def get_size(size):
     except: return "N/A"
 
 def retry_btn(id):
-    # This function needs the session_id, but it's not available in this context anymore.
-    # The retry logic will need to be re-thought, for now, we remove the session_id to prevent an error.
-    # A proper fix would involve storing the session details along with the task status.
     return InlineKeyboardMarkup([[InlineKeyboardButton('Retry', f"start_public_{id}")]])
