@@ -222,10 +222,12 @@ async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
         
         if manager and workers:
             report += "\n\n✅ **System Ready.** Please select the number of workers to use for this task."
+            
             buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
             grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
             grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
             grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
+            
             await bot.send_message(user_id, report, reply_markup=InlineKeyboardMarkup(grid))
         else:
             report += "\n\n❌ **Setup Incomplete.** Please configure the missing items in /settings before proceeding."
