@@ -9,8 +9,7 @@ from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT
-from .unequify import process_unequify_target
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from pyrogram.errors import PeerIdInvalid
 
@@ -27,123 +26,105 @@ def parse_message_input(message):
         chat_id = f"-100{match.group(3)}" if match.group(3).isdigit() else match.group(3)
         return chat_id, int(match.group(4)), None
     elif message.forward_from_chat: return message.forward_from_chat.id, message.forward_from_message_id, None
-    elif message.forward_from:
-         return None, None, "Cannot forward from this source. It may be a restricted channel or a user who has hidden their account."
     return None, None, "Could not identify the source. Please send a valid message link or forward a message from the source chat."
 
 @Client.on_message(filters.private & filters.command(["fwd", "forward"]))
 async def run(bot, message):
     user_id = message.from_user.id
-    if temp.lock.get(user_id): return await message.reply("A task is in progress.")
+    if temp.lock.get(user_id): return await message.reply("A task is already in progress.")
     temp.USER_STATES.pop(user_id, None)
+    
     bots = await db.get_bots(user_id)
-    if not bots: return await message.reply("Add a bot or userbot in /settings.")
+    if not bots: return await message.reply("You haven't added any bots or userbots. Please add one in `/settings` to act as the **Fetcher**.")
+
     if len(bots) == 1:
-        temp.FORWARD_BOT_ID[user_id] = bots[0]['id']
+        temp.USER_STATES[user_id] = {'bot_id': bots[0]['id']}
         await prompt_target_channel(bot, message)
     else:
-        buttons = [[InlineKeyboardButton(b['name'], callback_data=f"fwd_select_bot_{b['id']}")] for b in bots]
+        buttons = [[InlineKeyboardButton(b['name'], callback_data=f"fwd_select_fetcher_{b['id']}")] for b in bots]
         buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-        await message.reply("<b>Select a Bot or Userbot to act as the Fetcher:</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply("<b>Step 1: Select the Fetcher</b>\n\nThis bot/userbot will be used to read messages from the source channel.", reply_markup=InlineKeyboardMarkup(buttons))
 
-@Client.on_callback_query(filters.regex(r'^fwd_select_bot_'))
-async def cb_select_bot(bot, query):
-    temp.FORWARD_BOT_ID[query.from_user.id] = int(query.data.split('_')[-1])
+@Client.on_callback_query(filters.regex(r'^fwd_select_fetcher_'))
+async def cb_select_fetcher(bot, query):
+    user_id = query.from_user.id
+    bot_id = int(query.data.split('_')[-1])
+    temp.USER_STATES[user_id] = {'bot_id': bot_id}
     await query.message.delete()
     await prompt_target_channel(bot, query.message)
 
 async def prompt_target_channel(bot, message):
     channels = await db.get_user_channels(message.chat.id)
-    if not channels: return await message.reply("Add a target channel in /settings.")
+    if not channels: return await message.reply("You haven't added any target channels. Please add one in `/settings`.")
+    
     buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in channels]
     buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-    await message.reply(Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply("<b>Step 2: Select the Target Channel</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^fwd_target_'))
 async def cb_select_target(bot, query):
+    user_id = query.from_user.id
+    state = temp.USER_STATES.get(user_id)
+    if not state or 'bot_id' not in state:
+        return await query.message.edit("Error: Fetcher Bot selection was lost. Please start over with /forward.")
+
+    state['to_chat_id'] = int(query.data.split('_')[-1])
     prompt = await query.message.edit_text(Translation.FROM_MSG)
-    temp.USER_STATES[query.from_user.id] = {"state": "awaiting_source", "to_chat_id": int(query.data.split('_')[-1]), "prompt_message_id": prompt.id}
+    state['state'] = "awaiting_source"
+    state['prompt_message_id'] = prompt.id
 
 @Client.on_message(filters.private & filters.incoming, group=-1)
 async def stateful_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
-    if not state:
-        return
+    if not state: return
 
     if message.text and message.text.lower() == "/cancel":
-        prompt_id = state.get("prompt_message_id")
-        if prompt_id:
-            try: await bot.delete_messages(user_id, prompt_id)
-            except Exception: pass
+        if state.get("prompt_message_id"):
+            try: await bot.delete_messages(user_id, state["prompt_message_id"])
+            except: pass
         temp.USER_STATES.pop(user_id, None)
         return await message.reply(Translation.CANCEL)
 
     state_type = state.get("state")
-    prompt_message_id = state.get("prompt_message_id")
-    if prompt_message_id:
-        try: await bot.delete_messages(user_id, prompt_message_id)
-        except Exception: pass
+    if state.get("prompt_message_id"):
+        try: await bot.delete_messages(user_id, state["prompt_message_id"])
+        except: pass
     
     if state_type == "awaiting_source":
         from_chat, end_id, error = parse_message_input(message)
+        bot_id = state.get("bot_id")
         temp.USER_STATES.pop(user_id, None)
         if error: return await message.reply(error)
         
         from_title = "Private Chat"
         try:
-            bot_id = temp.FORWARD_BOT_ID.get(user_id)
-            if not bot_id: return await message.reply("⚠️ Error: Bot selection lost. Please start over.")
+            if not bot_id: return await message.reply("⚠️ Error: Fetcher Bot selection lost. Please start over.")
             bot_config = await db.get_bot(user_id, bot_id)
-            if not bot_config: return await message.reply("⚠️ Error: Selected bot not found.")
+            if not bot_config: return await message.reply("⚠️ Error: Selected Fetcher Bot not found in database.")
             
             async with CLIENT().client(bot_config) as temp_client:
                 from_title = (await temp_client.get_chat(from_chat)).title
         except PeerIdInvalid:
-             return await message.reply("⚠️ **Error:** The selected bot/userbot is not in the source channel.")
+             return await message.reply("⚠️ **Access Error:** The selected Fetcher Bot/Userbot is not a member of the source channel. Please add it and try again.")
         except Exception as e:
             logger.error(f"Could not get chat title for {from_chat}. Error: {e}", exc_info=True)
-            await message.reply(f"Could not verify source channel. Using default name.\n`{e}`")
         
-        await start_range_selection(bot, message, from_chat, from_title, state["to_chat_id"], 1, end_id)
+        await start_range_selection(bot, message, from_chat, from_title, state["to_chat_id"], 1, end_id, bot_id=bot_id)
 
     elif state_type == "awaiting_range_edit":
         session_id = state.get("session_id")
         part_to_edit = state.get("part_to_edit")
-        
         temp.USER_STATES.pop(user_id, None)
         try: await message.delete()
-        except Exception: pass
-
+        except: pass
         session = temp.RANGE_SESSIONS.get(session_id)
         if not session: return
-
         if not message.text or not message.text.isdigit():
-            await bot.send_message(user_id, "Invalid ID. Please provide only numbers.")
-            await update_range_message(bot, session_id) # Resend the menu
-            return
-
+            await bot.send_message(user_id, "Invalid ID. Please send only numbers.")
+            return await update_range_message(bot, session_id)
         session[f"{part_to_edit}_id"] = int(message.text)
         await update_range_message(bot, session_id)
-
-    elif state_type in ["awaiting_unequify_manual_target", "awaiting_unequify_chat_selection"]:
-        userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
-        if not userbot_id:
-            temp.USER_STATES.pop(user_id, None)
-            return await message.reply("⚠️ Error: Userbot selection lost. Start over with /unequify.")
-        
-        if state_type == "awaiting_unequify_manual_target":
-            target_input = message.text
-        else: # awaiting_unequify_chat_selection
-            selection = message.text
-            chats = state.get("chats", {})
-            selected_chat = chats.get(selection) or chats.get(f"-100{selection}")
-            if not selected_chat:
-                return await message.reply("Invalid selection. Please reply with the number or ID from the list.")
-            target_input = selected_chat.id
-        
-        await process_unequify_target(bot, message, user_id, userbot_id, target_input)
-        temp.USER_STATES.pop(user_id, None)
         
     elif state_type == "awaiting_bot_token":
         await CLIENT().add_bot(bot, message)
@@ -156,45 +137,57 @@ async def stateful_message_handler(bot: Client, message: Message):
         temp.USER_STATES.pop(user_id, None)
     elif state_type == "awaiting_channel_forward":
         if message.forward_from_chat:
-            try:
-                await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
-                await message.reply("✅ Channel added successfully.")
-            except Exception as e:
-                await message.reply(f"⚠️ Error adding channel: {e}")
+            await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
+            await message.reply("✅ Channel added.")
         else:
             await message.reply("Please forward a message from the channel.")
         temp.USER_STATES.pop(user_id, None)
 
+@Client.on_callback_query(filters.regex(r"^range_confirm_"))
+async def range_confirm_handler(bot, query):
+    session_id = query.data.split('_')[-1]
+    await query.message.delete()
+    await ask_for_workers(bot, query, session_id)
+
 async def ask_for_workers(bot, query, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
-    workers = await db.get_worker_bots(query.from_user.id)
-    if not workers: return await show_final_confirmation(bot, query, session_id, 0)
     
-    buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers:{session_id}:{i}")] for i in range(1, len(workers) + 1)]
-    grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
-    grid.append([InlineKeyboardButton("✨ Use All", callback_data=f"fwd_workers:{session_id}:{len(workers)}")])
-    grid.append([InlineKeyboardButton("Skip", callback_data=f"fwd_workers:{session_id}:0"), InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-    await bot.send_message(query.from_user.id, "How many worker bots to use?", reply_markup=InlineKeyboardMarkup(grid))
+    workers = await db.get_worker_bots(query.from_user.id)
+    manager = await db.get_manager_userbot(query.from_user.id)
+    
+    if not workers or not manager:
+        text = ""
+        if not manager: text += "• Set a **Manager Userbot** in `/settings`\n"
+        if not workers: text += "• Add at least one **Worker Bot** in `/settings`\n"
+        await bot.send_message(query.from_user.id, f"⚠️ **Setup Incomplete**\n\nBefore you can forward, you need to:\n{text}")
+        return
 
-@Client.on_callback_query(filters.regex(r"^fwd_workers:"))
+    buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
+    grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
+    grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
+    await bot.send_message(query.from_user.id, "<b>Step 4: Select Number of Workers</b>\n\nHow many worker bots do you want to use for this task?", reply_markup=InlineKeyboardMarkup(grid))
+
+@Client.on_callback_query(filters.regex(r"^fwd_workers_"))
 async def cb_select_workers(bot, query):
-    _, session_id, num_workers = query.data.split(":")
+    _, session_id, num_workers = query.data.split("_")
     await query.message.delete()
     await show_final_confirmation(bot, query, session_id, int(num_workers))
 
 async def show_final_confirmation(bot, query, session_id, num_workers):
     user_id = query.from_user.id
     session = temp.RANGE_SESSIONS.get(session_id)
-    if not session: return await bot.send_message(user_id, "⚠️ Your session has expired.")
+    if not session: return await bot.send_message(user_id, "⚠️ Your session has expired. Please start over.")
     
-    bot_id = temp.FORWARD_BOT_ID.get(user_id)
+    bot_id = session.get('bot_id')
+    if not bot_id: return await bot.send_message(user_id, "⚠️ Fetcher Bot selection lost. Please start over.")
+    
     _bot = await db.get_bot(user_id, bot_id)
     to_title = (await db.get_channel_details(user_id, session['to_chat_id']))['title']
     
     forward_id = generate_short_id()
     session['num_workers'] = num_workers
-    # We move the session data to a new key to avoid conflicts if the user starts another task
     temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
     
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
@@ -202,7 +195,7 @@ async def show_final_confirmation(bot, query, session_id, num_workers):
     await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
         botname=_bot['name'], botuname=_bot.get('username', 'N/A'), from_chat=session['from_title'], to_chat=to_title,
         message_range=f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}") + 
-        f"\n\n**Worker Bots:** `{num_workers}`",
+        f"\n\n**Worker Bots to use:** `{num_workers}`",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}")],
             [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
