@@ -12,7 +12,7 @@ from pyrogram import Client, filters
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import (
     FloodWait, MessageNotModified, RPCError, MediaEmpty, 
-    UserNotParticipant, PeerIdInvalid
+    UserNotParticipant, PeerIdInvalid, UserAlreadyParticipant
 )
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message, ChatPrivileges
 from itertools import cycle
@@ -86,37 +86,47 @@ async def pub_(bot, cb):
         main_worker_config = await db.get_main_worker(user_id)
         if not main_worker_config:
             await msg_edit(m, "Main worker bot not set. Please set one in /settings.", wait=True)
-            all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
+            all_clients_to_stop = [main_client] + worker_clients
             await stop_all(all_clients_to_stop, user_id, frwd_id, m)
             return
         
         main_worker_client = None
         try:
+            # Step 1: Create an invite link with the main_client (fetcher)
+            await msg_edit(m, "Creating temporary invite for main worker...")
+            try:
+                invite_link = await main_client.export_chat_invite_link(i.TO)
+            except Exception as e:
+                await msg_edit(m,
+                    f"❌ **Permission Error:** The **Fetcher Bot** (`{main_client.me.first_name}`) could not create an invite link for the target channel (`{to_title}`).\n\n"
+                    "**Solution:** Please make the Fetcher Bot an admin in the target channel with the **'Invite Users via Link'** permission."
+                )
+                all_clients_to_stop = [main_client] + worker_clients
+                await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+                return
+
+            # Step 2: Start the main worker and join the channel
+            await msg_edit(m, "Starting main worker to join target channel...")
             main_worker_client = await start_clone_bot(CLIENT.client(main_worker_config), main_worker_config)
-            
-            await msg_edit(m, "Main worker is verifying other workers...")
+            try:
+                await main_worker_client.join_chat(invite_link)
+            except UserAlreadyParticipant:
+                pass # Bot is already in the chat, which is fine.
+            except Exception as e:
+                await msg_edit(m, f"❌ **Error:** The Main Worker Bot failed to join the target channel using the invite link.\n\n`{e}`")
+                all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
+                await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+                return
+
+            # Step 3: Promote other workers
+            await msg_edit(m, "Main worker is setting up other workers...")
             for worker_client in worker_clients:
                 try:
-                    member = await main_worker_client.get_chat_member(i.TO, worker_client.me.id)
-                    if member.status != ChatMemberStatus.ADMINISTRATOR:
-                        await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
+                    await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
                 except UserNotParticipant:
                     await main_worker_client.add_chat_members(i.TO, worker_client.me.id)
                     await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
-        
-        except PeerIdInvalid:
-            await msg_edit(m,
-                f"❌ **Configuration Error:** The **Main Worker Bot** could not find the target channel: **{to_title}** (`{i.TO}`).\n\n"
-                "This error means the bot is not a member of that channel.\n\n"
-                "**Troubleshooting Steps:**\n"
-                "1. **Check the Bot:** Go to `/settings` -> `Worker Bots` and confirm which bot is your 👑 **Main Worker**.\n"
-                "2. **Check Membership:** Go to the admin list of your target channel (`{to_title}`) and confirm that exact bot is listed.\n"
-                "3. **Re-add the Bot:** Try removing the Main Worker Bot from the channel and adding it back as an admin.\n"
-                "4. **Check Permissions:** Ensure the Main Worker Bot has the **'Add New Admins'** permission in the target channel."
-            )
-            all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
-            await stop_all(all_clients_to_stop, user_id, frwd_id, m)
-            return
+
         except Exception as e:
             await msg_edit(m, f"An error occurred while setting up worker bots: `{e}`\n\nPlease ensure the Main Worker Bot has 'Add New Admins' permission in the target channel.", wait=True)
             all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
