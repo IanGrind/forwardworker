@@ -6,7 +6,7 @@ from config import Config, temp
 from translation import Translation
 from pyrogram import Client, filters
 from .test import CLIENT, update_configs
-from .utils import parse_buttons
+from .parser import parse_buttons # <-- FIXED IMPORT
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 CLIENT = CLIENT()
