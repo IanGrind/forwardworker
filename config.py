@@ -20,7 +20,6 @@ class temp(object):
     # Dictionaries for managing interactive sessions
     RANGE_SESSIONS = {}
     USER_STATES = {} # For stateful conversations
-    SESSIONS_MAP = {} # Maps forward_id to session_id
     # For tracking active tasks
     ACTIVE_TASKS = {} # {user_id: {task_id: {"process": message_obj, "details": {}}}}
     # User-specific bot selections for concurrent operations
