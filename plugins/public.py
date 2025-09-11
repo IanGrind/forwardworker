@@ -153,31 +153,94 @@ async def stateful_message_handler(bot: Client, message: Message):
             await show_settings_menu(bot, message, 'channels')
 
 
-@Client.on_callback_query(filters.regex(r"^range_confirm_"))
-async def range_confirm_handler(bot, query):
-    session_id = query.data.split('_')[-1]
-    await query.message.delete()
-    await ask_for_workers(bot, query, session_id)
-
-async def ask_for_workers(bot, query, session_id):
-    session = temp.RANGE_SESSIONS.get(session_id)
-    if not session: return
+@Client.on_callback_query(filters.regex(r"^(range_|noop)"))
+async def range_menu_handler(bot: Client, query: CallbackQuery):
+    user_id = query.from_user.id
     
-    workers = await db.get_worker_bots(query.from_user.id)
-    manager = await db.get_manager_userbot(query.from_user.id)
-    
-    if not workers or not manager:
-        text = ""
-        if not manager: text += "• Set a **Manager Userbot** in `/settings`\n"
-        if not workers: text += "• Add at least one **Worker Bot** in `/settings`\n"
-        await bot.send_message(query.from_user.id, f"⚠️ **Setup Incomplete**\n\nBefore you can forward, you need to:\n{text}")
-        return
+    if query.data == "noop":
+        return await query.answer()
 
+    try:
+        parts = query.data.split('_')
+        action = parts[1]
+        session_id = parts[-1]
+
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session or session.get('user_id') != user_id:
+            return await query.answer("This menu is not for you, or the session has expired.", show_alert=True)
+
+        if action == "confirm":
+            await query.message.delete()
+            await pre_flight_check(bot, query, session_id)
+
+        elif action == "cancel":
+            temp.RANGE_SESSIONS.pop(session_id, None)
+            await query.message.delete()
+            await bot.send_message(user_id, "Operation cancelled.")
+
+        elif action == "edit":
+            part_to_edit = parts[2]
+            prompt_text = f"OK, send the new **{part_to_edit}** message ID.\n\n/cancel to abort."
+            prompt_msg = await query.message.edit_text(prompt_text)
+            temp.USER_STATES[user_id] = {
+                "state": "awaiting_range_edit",
+                "session_id": session_id,
+                "part_to_edit": part_to_edit,
+                "prompt_message_id": prompt_msg.id
+            }
+
+        elif action == "swap":
+            start, end = session['start_id'], session['end_id']
+            session['start_id'] = end
+            session['end_id'] = start
+            session['order'] = 'desc' if session['order'] == 'asc' else 'asc'
+            await update_range_message(bot, session_id, message_to_edit=query.message)
+            await query.answer("Order swapped")
+
+    except Exception as e:
+        logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
+        await query.answer("An error occurred.", show_alert=True)
+
+async def pre_flight_check(bot, query, session_id):
+    user_id = query.from_user.id
+    try:
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session:
+            return await bot.send_message(user_id, "⚠️ Your session has expired. Please start over with /forward.")
+
+        workers = await db.get_worker_bots(user_id)
+        manager = await db.get_manager_userbot(user_id)
+        
+        # Build a diagnostic report
+        manager_status = f"✅ `{manager['name']}`" if manager else "⚠️ **Not Set**"
+        worker_status = f"✅ `{len(workers)}` Found" if workers else "⚠️ **None Found**"
+        
+        report = (
+            "**Step 3: Pre-Flight Check**\n\n"
+            "The bot has checked your setup for the required components.\n\n"
+            f"● **Manager Userbot:** {manager_status}\n"
+            f"● **Worker Bots:** {worker_status}"
+        )
+        
+        is_ready = manager and workers
+        if is_ready:
+            report += "\n\n✅ **System Ready.** Please select the number of workers to use for this task."
+            await bot.send_message(user_id, report)
+            await ask_for_workers(bot, query, session_id, workers)
+        else:
+            report += "\n\n❌ **Setup Incomplete.** Please configure the missing items in /settings before proceeding."
+            await bot.send_message(user_id, report)
+
+    except Exception as e:
+        logger.error(f"Error in pre_flight_check: {e}", exc_info=True)
+        await bot.send_message(user_id, f"An unexpected error occurred while checking your setup: `{e}`")
+
+async def ask_for_workers(bot, query, session_id, workers):
     buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
     grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
     grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
     grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
-    await bot.send_message(query.from_user.id, "<b>Step 4: Select Number of Workers</b>\n\nHow many worker bots do you want to use for this task?", reply_markup=InlineKeyboardMarkup(grid))
+    await bot.send_message(query.from_user.id, "How many worker bots do you want to use for this task?", reply_markup=InlineKeyboardMarkup(grid))
 
 @Client.on_callback_query(filters.regex(r"^fwd_workers_"))
 async def cb_select_workers(bot, query):
