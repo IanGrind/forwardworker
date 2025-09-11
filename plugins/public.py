@@ -296,7 +296,6 @@ async def cb_select_workers(bot, query):
         session_id = parts[1]
         num_workers = int(parts[2])
         
-        # Acknowledge the callback immediately to prevent the user from seeing a loading icon.
         await query.answer()
         await query.message.delete()
         await show_final_confirmation(bot, session_id, num_workers)
@@ -306,20 +305,18 @@ async def cb_select_workers(bot, query):
 
 
 async def show_final_confirmation(bot, session_id, num_workers):
-    user_id = bot.me.id # A placeholder in case session is lost
+    user_id = bot.me.id
     try:
         session = temp.RANGE_SESSIONS.get(session_id)
         if not session:
             logger.warning(f"Session {session_id} not found in show_final_confirmation.")
-            # Use query from cb_select_workers context if available, else send message.
-            # This part is tricky as query is not passed here. Let's send a new message.
             await bot.send_message(
-                chat_id=user_id, # This is a fallback
+                chat_id=user_id,
                 text="⚠️ Your session has expired or could not be found. Please start the /forward command again."
             )
             return
 
-        user_id = session['user_id'] # Get correct user_id
+        user_id = session['user_id']
         bot_id = temp.FORWARD_BOT_ID.get(user_id)
         if not bot_id:
             await bot.send_message(user_id, "Error: Bot selection lost. Please start the process again.")
@@ -331,6 +328,9 @@ async def show_final_confirmation(bot, session_id, num_workers):
         message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
         forward_id = str(uuid4())
 
+        # Store the mapping and create a shorter callback data string
+        temp.SESSIONS_MAP[forward_id] = session_id
+        
         STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
         
         temp.RANGE_SESSIONS[session_id]['num_workers'] = num_workers
@@ -340,7 +340,7 @@ async def show_final_confirmation(bot, session_id, num_workers):
                 from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text) + f"\n\n**Worker Bots:** `{num_workers}`",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}_{session_id}")],
+                [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}")],
                 [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
             ]))
     except Exception as e:
