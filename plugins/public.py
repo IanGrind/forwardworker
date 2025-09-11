@@ -8,7 +8,6 @@ from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT
-from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
@@ -40,7 +39,7 @@ async def run(bot, message):
     else:
         buttons = [[InlineKeyboardButton(b['name'], callback_data=f"fwd_select_bot_{b['id']}")] for b in bots]
         buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-        await message.reply("<b>Select a Bot or Userbot</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply("<b>Select a Bot or Userbot to act as the Fetcher:</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^fwd_select_bot_'))
 async def cb_select_bot(bot, query):
@@ -72,7 +71,8 @@ async def stateful_message_handler(bot, message):
         temp.USER_STATES.pop(user_id, None)
         return await message.reply(Translation.CANCEL)
 
-    if state.get("state") == "awaiting_source":
+    state_type = state.get("state")
+    if state_type == "awaiting_source":
         try: await bot.delete_messages(user_id, state["prompt_message_id"])
         except: pass
         from_chat, end_id, error = parse_message_input(message)
@@ -81,6 +81,9 @@ async def stateful_message_handler(bot, message):
         try: from_title = (await bot.get_chat(from_chat)).title
         except: from_title = "Private Chat"
         await start_range_selection(bot, message, from_chat, from_title, state["to_chat_id"], 1, end_id)
+    elif state_type == "awaiting_bot_token": await CLIENT().add_bot(bot, message)
+    elif state_type == "awaiting_user_session": await CLIENT().add_session(bot, message)
+    elif state_type == "awaiting_worker_bot_token": await CLIENT().add_worker_bot(bot, message)
 
 @Client.on_callback_query(filters.regex(r"^range_confirm_fwd_final_"))
 async def range_confirm_callback(bot, query):
