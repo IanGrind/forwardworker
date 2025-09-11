@@ -168,7 +168,11 @@ async def stateful_message_handler(bot: Client, message: Message):
     
     elif current_state == "awaiting_worker_bot_token":
         temp.USER_STATES.pop(user_id, None)
-        await CLIENT().add_worker_bot(bot, message) # You'll need to create this method in test.py
+        await CLIENT().add_worker_bot(bot, message)
+
+    elif current_state == "awaiting_main_worker_token":
+        temp.USER_STATES.pop(user_id, None)
+        await CLIENT().add_main_worker_bot(bot, message)
 
 
     # --- FIXED UNEQIFY LOGIC ---
@@ -311,7 +315,6 @@ async def show_final_confirmation(bot, session_id, num_workers):
             [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}_{session_id}")],
             [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
         ]))
-    # temp.RANGE_SESSIONS.pop(session_id, None) # Don't pop here, we need it in regix.py
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
