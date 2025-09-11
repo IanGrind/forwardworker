@@ -6,17 +6,14 @@ from os import environ
 DB_NAME = Config.DB_NAME
 DB_URL = Config.DB_URL
 
-# Define a global variable for the database instance, initially None.
 db = None
 
 def initialize_database():
-    """Initializes the database connection and assigns it to the global 'db' variable."""
     global db
     if db is None:
         db = Database(DB_URL, DB_NAME)
 
 async def mongodb_version():
-    """Asynchronously gets the MongoDB server version."""
     client = AsyncIOMotorClient(Config.DB_URL)
     server_info = await client.server_info()
     return server_info['version']
@@ -28,10 +25,9 @@ class Database:
         self.db = self._client[database_name]
         self.bot = self.db.bots
         self.col = self.db.user
-        self.nfy = self.db.notify
         self.chl = self.db.channels
         self.worker = self.db.workers
-        self.main_worker = self.db.main_worker
+        self.manager = self.db.manager_userbot
 
     def new_user(self, id, name):
         return dict(
@@ -57,32 +53,20 @@ class Database:
         return count, bcount
 
     async def total_channels(self):
-        count = await self.chl.count_documents({})
-        return count
+        return await self.chl.count_documents({})
 
     async def remove_ban(self, id):
-        ban_status = dict(
-            is_banned=False,
-            ban_reason=''
-        )
+        ban_status = dict(is_banned=False, ban_reason='')
         await self.col.update_one({'id': id}, {'$set': {'ban_status': ban_status}})
 
     async def ban_user(self, user_id, ban_reason="No Reason"):
-        ban_status = dict(
-            is_banned=True,
-            ban_reason=ban_reason
-        )
+        ban_status = dict(is_banned=True, ban_reason=ban_reason)
         await self.col.update_one({'id': user_id}, {'$set': {'ban_status': ban_status}})
 
     async def get_ban_status(self, id):
-        default = dict(
-            is_banned=False,
-            ban_reason=''
-        )
+        default = dict(is_banned=False, ban_reason='')
         user = await self.col.find_one({'id':int(id)})
-        if not user:
-            return default
-        return user.get('ban_status', default)
+        return user.get('ban_status', default) if user else default
 
     async def get_all_users(self):
         return self.col.find({})
@@ -91,21 +75,15 @@ class Database:
         await self.col.delete_many({'id': int(user_id)})
         
     async def reset_user_data(self, user_id):
-        """ Resets a user's entire configuration to default. """
-        # Delete user's main config, bots, and channels
         user_doc = await self.col.find_one_and_delete({'id': int(user_id)})
         await self.bot.delete_many({'user_id': int(user_id)})
         await self.chl.delete_many({'user_id': int(user_id)})
-        
-        # Re-add the user with a fresh document if they existed
         if user_doc:
              await self.add_user(user_id, user_doc.get('name', str(user_id)))
-
 
     async def get_banned(self):
         users = self.col.find({'ban_status.is_banned': True})
         b_users = [user['id'] async for user in users]
-        # Also update the temp list on startup
         temp.BANNED_USERS = b_users
         return b_users
 
@@ -114,131 +92,73 @@ class Database:
 
     async def get_configs(self, id):
         default = {
-            'caption': None,
-            'duplicate': True,
-            'forward_tag': False,
-            'file_size': 0,
-            'size_limit': None,
-            'extension': None,
-            'keywords': None,
-            'protect': None,
-            'button': None,
-            'db_uri': None,
-            'forward_delay': 1.0, # Added default for forward_delay
-            'filters': {
-               'poll': True,
-               'text': True,
-               'audio': True,
-               'voice': True,
-               'video': True,
-               'photo': True,
-               'document': True,
-               'animation': True,
-               'sticker': True
-            }
+            'caption': None, 'duplicate': True, 'forward_tag': False,
+            'file_size': 0, 'size_limit': None, 'extension': None,
+            'keywords': None, 'protect': None, 'button': None,
+            'db_uri': None, 'forward_delay': 1.0,
+            'filters': {'poll': True, 'text': True, 'audio': True, 'voice': True, 'video': True, 'photo': True, 'document': True, 'animation': True, 'sticker': True}
         }
         user = await self.col.find_one({'id':int(id)})
         if user:
-            # Merge stored configs with default to prevent KeyErrors on missing keys
             user_configs = user.get('configs', {})
-            # The default dictionary is the base
             final_configs = default.copy()
-            # Update with user's saved settings
             final_configs.update(user_configs)
-            # Ensure nested 'filters' dictionary is also merged
             if 'filters' in user_configs:
                 final_configs['filters'] = default['filters'].copy()
                 final_configs['filters'].update(user_configs['filters'])
             return final_configs
         return default
 
-
     async def add_bot(self, datas):
        await self.bot.insert_one(datas)
 
     async def remove_bot(self, user_id, bot_id):
        await self.bot.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
+       await self.manager.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
 
     async def get_bot(self, user_id: int, bot_id: int):
-       bot = await self.bot.find_one({'user_id': user_id, 'id': bot_id})
-       return bot if bot else None
+       return await self.bot.find_one({'user_id': user_id, 'id': bot_id})
 
     async def get_bots(self, user_id: int):
-        bots = self.bot.find({'user_id': user_id})
-        return [bot async for bot in bots]
+        return [bot async for bot in self.bot.find({'user_id': user_id})]
 
     async def is_bot_exist(self, user_id, bot_id):
-       bot = await self.bot.find_one({'user_id': user_id, 'id': bot_id})
-       return bool(bot)
+       return bool(await self.bot.find_one({'user_id': user_id, 'id': bot_id}))
 
     async def in_channel(self, user_id: int, chat_id: int) -> bool:
-       channel = await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)})
-       return bool(channel)
+       return bool(await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)}))
 
     async def add_channel(self, user_id: int, chat_id: int, title, username):
-       # Check if the channel already exists for this user
-       if await self.in_channel(user_id, chat_id):
-           return False
-       # Add the channel if it does not exist
+       if await self.in_channel(user_id, chat_id): return False
        return await self.chl.insert_one({"user_id": user_id, "chat_id": chat_id, "title": title, "username": username})
 
     async def remove_channel(self, user_id: int, chat_id: int):
-       channel = await self.in_channel(user_id, chat_id )
-       if not channel:
-         return False
+       if not await self.in_channel(user_id, chat_id ): return False
        return await self.chl.delete_many({"user_id": int(user_id), "chat_id": int(chat_id)})
 
     async def get_channel_details(self, user_id: int, chat_id: int):
        return await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)})
 
     async def get_user_channels(self, user_id: int):
-       channels = self.chl.find({"user_id": int(user_id)})
-       return [channel async for channel in channels]
+       return [channel async for channel in self.chl.find({"user_id": int(user_id)})]
 
-    async def get_filters(self, user_id):
-       filters = []
-       filter = (await self.get_configs(user_id))['filters']
-       for k, v in filter.items():
-          if v == False:
-            filters.append(str(k))
-       return filters
-
-    async def add_frwd(self, user_id):
-       return await self.nfy.insert_one({'user_id': int(user_id)})
-
-    async def rmve_frwd(self, user_id=0, all=False):
-       data = {} if all else {'user_id': int(user_id)}
-       return await self.nfy.delete_many(data)
-
-    async def get_all_frwd(self):
-       return self.nfy.find({})
-    
     async def add_worker_bot(self, datas):
         await self.worker.insert_one(datas)
 
     async def remove_worker_bot(self, user_id, bot_id):
         await self.worker.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
-        # Also remove it if it was the main worker
-        await self.main_worker.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
 
     async def get_worker_bots(self, user_id: int):
-        workers = self.worker.find({'user_id': user_id})
-        return [worker async for worker in workers]
+        return [worker async for worker in self.worker.find({'user_id': user_id})]
 
     async def is_worker_bot_exist(self, user_id, bot_id):
-        worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
-        return bool(worker)
+        return bool(await self.worker.find_one({'user_id': user_id, 'id': bot_id}))
 
-    async def set_main_worker(self, user_id, bot_id):
-        # Remove any existing main worker for this user
-        await self.main_worker.delete_many({'user_id': user_id})
-        worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
-        if worker:
-            await self.main_worker.insert_one(worker)
+    async def set_manager_userbot(self, user_id, bot_id):
+        await self.manager.delete_many({'user_id': user_id})
+        userbot = await self.bot.find_one({'user_id': user_id, 'id': bot_id, 'is_bot': False})
+        if userbot:
+            await self.manager.insert_one(userbot)
 
-    async def get_main_worker(self, user_id):
-        return await self.main_worker.find_one({'user_id': user_id})
-
-    async def get_worker_bot(self, user_id: int, bot_id: int):
-        worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
-        return worker if worker else None
+    async def get_manager_userbot(self, user_id):
+        return await self.manager.find_one({'user_id': user_id})
