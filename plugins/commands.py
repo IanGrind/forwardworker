@@ -9,6 +9,7 @@ from translation import Translation
 from pyrogram import Client, filters, enums, __version__ as pyrogram_version
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, Message, CallbackQuery
 from .test import update_configs, CLIENT
+from pyrogram.errors import PeerIdInvalid
 
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 
@@ -290,3 +291,60 @@ async def status(bot, query):
         parse_mode=enums.ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+# === New Diagnostic Command ===
+@Client.on_message(filters.private & filters.command(['testworker']))
+async def test_worker_command(client, message):
+    user_id = message.from_user.id
+    if len(message.command) < 2:
+        return await message.reply_text("<b>Usage:</b> /testworker [target_channel_id]\n\nExample: `/testworker -1003060523725`")
+
+    target_chat_id_str = message.command[1]
+    try:
+        target_chat_id = int(target_chat_id_str)
+    except ValueError:
+        return await message.reply_text("The Chat ID must be a number.")
+
+    status_msg = await message.reply_text("🔄 **Running diagnostic test...**")
+
+    main_worker_config = await db.get_main_worker(user_id)
+    if not main_worker_config:
+        return await status_msg.edit("❌ **Error:** No Main Worker Bot is set. Please set one in `/settings` -> `Worker Bots`.")
+
+    main_worker_client = None
+    try:
+        await status_msg.edit("⚙️ Starting Main Worker client...")
+        main_worker_client = CLIENT().client(main_worker_config)
+        await main_worker_client.start()
+        
+        await status_msg.edit(f"🔎 Attempting to access channel `{target_chat_id}`...")
+        
+        chat = await main_worker_client.get_chat(target_chat_id)
+        
+        await status_msg.edit(
+            f"✅ **Success!**\n\n"
+            f"The Main Worker Bot (`@{main_worker_client.me.username}`) **can** access the channel.\n\n"
+            f"**Channel Title:** `{chat.title}`\n"
+            f"**Channel ID:** `{chat.id}`\n\n"
+            "If this test succeeds but forwarding still fails, the issue is likely with the bot's permissions (e.g., 'Add New Admins')."
+        )
+
+    except PeerIdInvalid:
+        main_worker_username = "N/A"
+        if main_worker_client and main_worker_client.is_connected:
+            main_worker_username = f"@{main_worker_client.me.username}"
+
+        await status_msg.edit(
+            f"❌ **Test Failed: `PEER_ID_INVALID`**\n\n"
+            f"Telegram confirms that your Main Worker Bot ({main_worker_username}) is **NOT** a member of the channel with ID `{target_chat_id}`.\n\n"
+            "Please **very carefully** re-check that the token you set for the Main Worker corresponds to the bot you added to the channel."
+        )
+    except Exception as e:
+        await status_msg.edit(
+            f"❌ **Test Failed with an Unexpected Error:**\n\n"
+            f"`{type(e).__name__}`: `{e}`\n\n"
+            "This could be a permission issue (like being banned from the channel) or another problem."
+        )
+    finally:
+        if main_worker_client and main_worker_client.is_connected:
+            await main_worker_client.stop()
