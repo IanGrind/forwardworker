@@ -9,7 +9,6 @@ from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, UserAlreadyParticipant, PeerIdInvalid
 from pyrogram.types import CallbackQuery, ChatPrivileges
 
-CLIENT = CLIENT()
 logger = logging.getLogger(__name__)
 
 @Client.on_callback_query(filters.regex(r'^start_public_'))
@@ -26,13 +25,11 @@ async def pub_(bot, cb: CallbackQuery):
     await cb.answer()
     m = await cb.message.edit("`Initializing task...`")
 
-    # Initialize all clients that will be used
     fetcher_client = None
     manager_client = None
     worker_clients = []
     
     try:
-        # Get configurations from the database
         fetcher_config = await db.get_bot(user_id, session['bot_id'])
         manager_config = await db.get_manager_userbot(user_id)
         worker_configs = (await db.get_worker_bots(user_id))[:session['num_workers']]
@@ -40,9 +37,8 @@ async def pub_(bot, cb: CallbackQuery):
         if not fetcher_config or not manager_config or not worker_configs:
             return await m.edit("Error: A required bot/userbot configuration was not found.")
 
-        # --- 1. SETUP PHASE: MANAGER AND WORKERS ---
         await m.edit("`Step 1/3: Starting Manager Userbot...`")
-        manager_client = await start_clone_bot(CLIENT().client(manager_config), manager_config)
+        manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
         
         target_chat_id = session['to_chat_id']
         try:
@@ -55,7 +51,7 @@ async def pub_(bot, cb: CallbackQuery):
         await m.edit("`Step 1/3: Starting Worker Bots...`")
         for i, config in enumerate(worker_configs):
             await m.edit(f"`Step 1/3: Starting Worker Bot {i+1}/{len(worker_configs)}...`")
-            worker_clients.append(await start_clone_bot(CLIENT().client(config), config))
+            worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
 
         await m.edit("`Step 2/3: Manager is adding workers to the target channel...`")
         for i, worker in enumerate(worker_clients):
@@ -63,7 +59,7 @@ async def pub_(bot, cb: CallbackQuery):
             try:
                 await manager_client.add_chat_members(target_chat_id, worker.me.id)
             except UserAlreadyParticipant:
-                pass # Already in the channel, that's fine
+                pass
             except Exception as e:
                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to add worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add Members' permission.")
 
@@ -75,9 +71,8 @@ async def pub_(bot, cb: CallbackQuery):
             except Exception as e:
                  return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add New Admins' permission.")
 
-        # --- 2. FORWARDING PHASE ---
         await m.edit("`Step 3/3: Starting Fetcher Client...`")
-        fetcher_client = await start_clone_bot(CLIENT().client(fetcher_config), fetcher_config)
+        fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=target_chat_id, start_id=session['start_id'], end_id=session['end_id'])
         
@@ -103,12 +98,12 @@ async def pub_(bot, cb: CallbackQuery):
                     sts.add('total_files')
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 1)
-                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id) # Retry
+                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id)
                     sts.add('total_files')
                 except Exception as e:
                     logger.warning(f"Failed to copy message {message.id}: {e}")
                     sts.add('failed')
-                await asyncio.sleep(0.1) # Small delay to be safe
+                await asyncio.sleep(0.1)
         
         if not temp.CANCEL.get(frwd_id):
             await m.edit("✅ **Forwarding Complete!**")
@@ -117,7 +112,6 @@ async def pub_(bot, cb: CallbackQuery):
         logger.error(f"A critical error occurred in the forwarding task: {e}", exc_info=True)
         await m.edit(f"**A critical error occurred:**\n\n`{type(e).__name__}`: `{e}`\n\nPlease check the logs.")
     finally:
-        # Clean up and stop all clients
         all_clients = [fetcher_client, manager_client] + worker_clients
         for client in all_clients:
             if client and client.is_connected:
