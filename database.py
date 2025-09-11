@@ -13,11 +13,6 @@ def initialize_database():
     if db is None:
         db = Database(DB_URL, DB_NAME)
 
-async def mongodb_version():
-    client = AsyncIOMotorClient(Config.DB_URL)
-    server_info = await client.server_info()
-    return server_info['version']
-
 class Database:
 
     def __init__(self, uri, database_name):
@@ -31,12 +26,9 @@ class Database:
 
     def new_user(self, id, name):
         return dict(
-            id = id,
-            name = name,
-            ban_status=dict(
-                is_banned=False,
-                ban_reason="",
-            ),
+            id=id,
+            name=name,
+            ban_status=dict(is_banned=False, ban_reason=""),
         )
 
     async def add_user(self, id, name):
@@ -44,29 +36,25 @@ class Database:
         await self.col.insert_one(user)
 
     async def is_user_exist(self, id):
-        user = await self.col.find_one({'id':int(id)})
-        return bool(user)
+        return bool(await self.col.find_one({'id': int(id)}))
 
     async def total_users_bots_count(self):
         bcount = await self.bot.count_documents({})
-        count = await self.col.count_documents({})
-        return count, bcount
+        ucount = await self.col.count_documents({})
+        return ucount, bcount
 
     async def total_channels(self):
         return await self.chl.count_documents({})
 
     async def remove_ban(self, id):
-        ban_status = dict(is_banned=False, ban_reason='')
-        await self.col.update_one({'id': id}, {'$set': {'ban_status': ban_status}})
+        await self.col.update_one({'id': id}, {'$set': {'ban_status': dict(is_banned=False, ban_reason='')}})
 
     async def ban_user(self, user_id, ban_reason="No Reason"):
-        ban_status = dict(is_banned=True, ban_reason=ban_reason)
-        await self.col.update_one({'id': user_id}, {'$set': {'ban_status': ban_status}})
+        await self.col.update_one({'id': user_id}, {'$set': {'ban_status': dict(is_banned=True, ban_reason=ban_reason)}})
 
     async def get_ban_status(self, id):
-        default = dict(is_banned=False, ban_reason='')
-        user = await self.col.find_one({'id':int(id)})
-        return user.get('ban_status', default) if user else default
+        user = await self.col.find_one({'id': int(id)})
+        return user.get('ban_status', dict(is_banned=False, ban_reason='')) if user else dict(is_banned=False, ban_reason='')
 
     async def get_all_users(self):
         return self.col.find({})
@@ -78,6 +66,7 @@ class Database:
         user_doc = await self.col.find_one_and_delete({'id': int(user_id)})
         await self.bot.delete_many({'user_id': int(user_id)})
         await self.chl.delete_many({'user_id': int(user_id)})
+        await self.worker.delete_many({'user_id': int(user_id)})
         if user_doc:
              await self.add_user(user_id, user_doc.get('name', str(user_id)))
 
@@ -95,17 +84,16 @@ class Database:
             'caption': None, 'duplicate': True, 'forward_tag': False,
             'file_size': 0, 'size_limit': None, 'extension': None,
             'keywords': None, 'protect': None, 'button': None,
-            'db_uri': None, 'forward_delay': 1.0,
+            'db_uri': None, 'forward_delay': 0.5,
             'filters': {'poll': True, 'text': True, 'audio': True, 'voice': True, 'video': True, 'photo': True, 'document': True, 'animation': True, 'sticker': True}
         }
-        user = await self.col.find_one({'id':int(id)})
+        user = await self.col.find_one({'id': int(id)})
         if user:
             user_configs = user.get('configs', {})
             final_configs = default.copy()
             final_configs.update(user_configs)
             if 'filters' in user_configs:
-                final_configs['filters'] = default['filters'].copy()
-                final_configs['filters'].update(user_configs['filters'])
+                final_configs['filters'] = {**default['filters'], **user_configs['filters']}
             return final_configs
         return default
 
@@ -125,22 +113,26 @@ class Database:
     async def is_bot_exist(self, user_id, bot_id):
        return bool(await self.bot.find_one({'user_id': user_id, 'id': bot_id}))
 
-    async def in_channel(self, user_id: int, chat_id: int) -> bool:
-       return bool(await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)}))
-
-    async def add_channel(self, user_id: int, chat_id: int, title, username):
+    async def add_channel(self, user_id, chat_id, title, username):
        if await self.in_channel(user_id, chat_id): return False
        return await self.chl.insert_one({"user_id": user_id, "chat_id": chat_id, "title": title, "username": username})
 
-    async def remove_channel(self, user_id: int, chat_id: int):
-       if not await self.in_channel(user_id, chat_id ): return False
+    async def remove_channel(self, user_id, chat_id):
+       if not await self.in_channel(user_id, chat_id): return False
        return await self.chl.delete_many({"user_id": int(user_id), "chat_id": int(chat_id)})
+    
+    async def in_channel(self, user_id: int, chat_id: int) -> bool:
+       return bool(await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)}))
 
     async def get_channel_details(self, user_id: int, chat_id: int):
        return await self.chl.find_one({"user_id": int(user_id), "chat_id": int(chat_id)})
 
     async def get_user_channels(self, user_id: int):
        return [channel async for channel in self.chl.find({"user_id": int(user_id)})]
+
+    async def get_filters(self, user_id):
+       configs = await self.get_configs(user_id)
+       return [k for k, v in configs.get('filters', {}).items() if not v]
 
     async def add_worker_bot(self, datas):
         await self.worker.insert_one(datas)
@@ -153,6 +145,9 @@ class Database:
 
     async def is_worker_bot_exist(self, user_id, bot_id):
         return bool(await self.worker.find_one({'user_id': user_id, 'id': bot_id}))
+    
+    async def get_worker_bot(self, user_id: int, bot_id: int):
+        return await self.worker.find_one({'user_id': user_id, 'id': bot_id})
 
     async def set_manager_userbot(self, user_id, bot_id):
         await self.manager.delete_many({'user_id': user_id})
