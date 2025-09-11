@@ -1,127 +1,130 @@
-import re
 import asyncio
 import logging
-import math
-import time
 from itertools import cycle
 from .utils import STS
 from database import db
 from .test import CLIENT, start_clone_bot
 from config import Config, temp
-from translation import Translation
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode, ChatMemberStatus
-from pyrogram.errors import FloodWait, MessageNotModified, UserNotParticipant, UserAlreadyParticipant
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message, ChatPrivileges
+from pyrogram.errors import FloodWait, UserAlreadyParticipant, PeerIdInvalid
+from pyrogram.types import CallbackQuery, ChatPrivileges
 
 CLIENT = CLIENT()
 logger = logging.getLogger(__name__)
 
 @Client.on_callback_query(filters.regex(r'^start_public_'))
-async def pub_(bot, cb):
+async def pub_(bot, cb: CallbackQuery):
     user_id = cb.from_user.id
     if temp.lock.get(user_id):
-        return await cb.answer("Task in progress.", show_alert=True)
+        return await cb.answer("Another task is already in progress.", show_alert=True)
 
     frwd_id = cb.data.split("_")[2]
-    # Corrected the dictionary from which the session is popped
-    session = temp.FORWARD_SESSIONS.pop(frwd_id, None)
+    session = temp.FORWARD_SESSIONS.get(frwd_id)
     if not session:
         return await cb.message.edit("This task has expired or is invalid.")
 
-    num_workers = session.get('num_workers', 0)
-    temp.CANCEL[frwd_id] = False
-    sts = STS(frwd_id)
-    if not sts.verify(): return await cb.answer("Task verification failed.", show_alert=True)
+    await cb.answer()
+    m = await cb.message.edit("`Initializing task...`")
 
-    i = sts.get(full=True)
-    m = await cb.message.edit("Verifying...")
-
-    _bot, _, _, data_params, _, _ = await sts.get_data(user_id)
-    delay = data_params.get('forward_delay', 0.5)
-
-    await m.edit("Starting clients...")
-    main_client, worker_clients = None, []
+    # Initialize all clients that will be used
+    fetcher_client = None
+    manager_client = None
+    worker_clients = []
+    
     try:
-        main_client = await start_clone_bot(CLIENT().client(_bot), _bot)
-        if num_workers > 0:
-            for config in (await db.get_worker_bots(user_id))[:num_workers]:
-                worker_clients.append(await start_clone_bot(CLIENT().client(config), config))
-    except Exception as e:
-        return await m.edit(f"Failed to start clients: {e}")
-
-    try:
-        from_title = (await main_client.get_chat(i.FROM)).title
-        to_title = (await main_client.get_chat(i.TO)).title
-    except Exception as e:
-        await m.edit(f"Error accessing chats: {e}")
-        await stop_all([main_client] + worker_clients, user_id, frwd_id)
-        return
-
-    if num_workers > 0:
+        # Get configurations from the database
+        fetcher_config = await db.get_bot(user_id, session['bot_id'])
         manager_config = await db.get_manager_userbot(user_id)
-        if not manager_config:
-            await m.edit("❌ **Manager Userbot not set.** Please set one in /settings.")
-            await stop_all([main_client] + worker_clients, user_id, frwd_id)
-            return
+        worker_configs = (await db.get_worker_bots(user_id))[:session['num_workers']]
+
+        if not fetcher_config or not manager_config or not worker_configs:
+            return await m.edit("Error: A required bot/userbot configuration was not found.")
+
+        # --- 1. SETUP PHASE: MANAGER AND WORKERS ---
+        await m.edit("`Step 1/3: Starting Manager Userbot...`")
+        manager_client = await start_clone_bot(CLIENT().client(manager_config), manager_config)
         
-        manager_client = None
+        target_chat_id = session['to_chat_id']
         try:
-            await m.edit("Manager Userbot is setting up workers...")
-            manager_client = await start_clone_bot(CLIENT().client(manager_config), manager_config)
-            
-            try: await manager_client.join_chat((await main_client.export_chat_invite_link(i.TO)))
-            except UserAlreadyParticipant: pass
-
-            for worker in worker_clients:
-                try: await manager_client.add_chat_members(i.TO, worker.me.id)
-                except UserAlreadyParticipant: pass
-                await manager_client.promote_chat_member(i.TO, worker.me.id, privileges=ChatPrivileges(can_post_messages=True))
+            await manager_client.get_chat(target_chat_id)
+        except PeerIdInvalid:
+            return await m.edit(f"**Setup Error:**\nManager Userbot (`{manager_config['name']}`) is not in the target channel. Please add it and try again.")
         except Exception as e:
-            await m.edit(f"Worker setup failed: `{e}`\n\nPlease ensure the Fetcher Bot has 'Invite' permission and the Manager Userbot has 'Add New Admins' permission in the target channel.")
-            await stop_all([main_client] + worker_clients + ([manager_client] if manager_client else []), user_id, frwd_id)
-            return
-        finally:
-            if manager_client: await manager_client.stop()
+            return await m.edit(f"**Setup Error:**\nCould not access target channel with Manager Userbot. Error: `{e}`")
 
-    temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m, "details": {"type": "Forwarding", "from": from_title, "to": to_title}}}
-    temp.lock[user_id] = True
-    
-    clients = worker_clients if worker_clients else [main_client]
-    client_cycler = cycle(clients)
-    
-    try:
-        await m.edit(f"Forwarding from {from_title} to {to_title}...")
-        message_ids = range(i.start_id, i.end_id + 1) if i.start_id < i.end_id else range(i.start_id, i.end_id - 1, -1)
-        for chunk in [message_ids[x:x + 200] for x in range(0, len(message_ids), 200)]:
-            if temp.CANCEL.get(frwd_id): break
-            messages = await main_client.get_messages(i.FROM, chunk)
+        await m.edit("`Step 1/3: Starting Worker Bots...`")
+        for i, config in enumerate(worker_configs):
+            await m.edit(f"`Step 1/3: Starting Worker Bot {i+1}/{len(worker_configs)}...`")
+            worker_clients.append(await start_clone_bot(CLIENT().client(config), config))
+
+        await m.edit("`Step 2/3: Manager is adding workers to the target channel...`")
+        for i, worker in enumerate(worker_clients):
+            await m.edit(f"`Step 2/3: Adding worker {i+1}/{len(worker_clients)}...`")
+            try:
+                await manager_client.add_chat_members(target_chat_id, worker.me.id)
+            except UserAlreadyParticipant:
+                pass # Already in the channel, that's fine
+            except Exception as e:
+                return await m.edit(f"**Setup Error:**\nManager Userbot failed to add worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add Members' permission.")
+
+        await m.edit("`Step 2/3: Manager is promoting workers...`")
+        for i, worker in enumerate(worker_clients):
+            await m.edit(f"`Step 2/3: Promoting worker {i+1}/{len(worker_clients)}...`")
+            try:
+                await manager_client.promote_chat_member(target_chat_id, worker.me.id, privileges=ChatPrivileges(can_post_messages=True))
+            except Exception as e:
+                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add New Admins' permission.")
+
+        # --- 2. FORWARDING PHASE ---
+        await m.edit("`Step 3/3: Starting Fetcher Client...`")
+        fetcher_client = await start_clone_bot(CLIENT().client(fetcher_config), fetcher_config)
+
+        sts = STS(frwd_id).store(From=session['from_chat_id'], to=target_chat_id, start_id=session['start_id'], end_id=session['end_id'])
+        
+        temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m, "details": {"type": "Forwarding", "from": session['from_title'], "to": "N/A"}}}
+        temp.lock[user_id] = True
+        
+        client_cycler = cycle(worker_clients)
+        
+        await m.edit(f"✅ **Setup Complete!**\n\nForwarding from **{session['from_title']}**...")
+        
+        message_ids = range(sts.start_id, sts.end_id + 1)
+        for chunk in [message_ids[i:i + 200] for i in range(0, len(message_ids), 200)]:
+            if temp.CANCEL.get(frwd_id):
+                await m.edit("Task cancelled by user.")
+                break
+            
+            messages = await fetcher_client.get_messages(sts.FROM, chunk)
             for message in messages:
                 if temp.CANCEL.get(frwd_id): break
                 sts.add('fetched')
                 try:
-                    await next(client_cycler).copy_message(i.TO, i.FROM, message.id)
+                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id)
                     sts.add('total_files')
                 except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    await next(client_cycler).copy_message(i.TO, i.FROM, message.id)
+                    await asyncio.sleep(e.value + 1)
+                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id) # Retry
                     sts.add('total_files')
                 except Exception as e:
                     logger.warning(f"Failed to copy message {message.id}: {e}")
                     sts.add('failed')
-                await asyncio.sleep(delay)
-        final_status = "cancelled" if temp.CANCEL.get(frwd_id) else "completed"
-    except Exception as e:
-        logger.error(f"Forwarding loop error: {e}", exc_info=True)
-        final_status = "error"
-    finally:
-        await m.edit(f"Forwarding {final_status}.")
-        await stop_all([main_client] + worker_clients, user_id, frwd_id)
+                await asyncio.sleep(0.1) # Small delay to be safe
+        
+        if not temp.CANCEL.get(frwd_id):
+            await m.edit("✅ **Forwarding Complete!**")
 
-async def stop_all(clients, user_id, task_id):
-    for client in clients:
-        if client and client.is_connected:
-            await client.stop()
-    temp.ACTIVE_TASKS.pop(user_id, None)
-    temp.CANCEL.pop(task_id, None)
-    temp.lock.pop(user_id, None)
+    except Exception as e:
+        logger.error(f"A critical error occurred in the forwarding task: {e}", exc_info=True)
+        await m.edit(f"**A critical error occurred:**\n\n`{type(e).__name__}`: `{e}`\n\nPlease check the logs.")
+    finally:
+        # Clean up and stop all clients
+        all_clients = [fetcher_client, manager_client] + worker_clients
+        for client in all_clients:
+            if client and client.is_connected:
+                try: await client.stop()
+                except: pass
+        
+        temp.FORWARD_SESSIONS.pop(frwd_id, None)
+        temp.ACTIVE_TASKS.pop(user_id, None)
+        temp.CANCEL.pop(frwd_id, None)
+        temp.lock.pop(user_id, None)
