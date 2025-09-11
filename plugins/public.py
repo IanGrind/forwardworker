@@ -268,15 +268,15 @@ async def ask_for_workers(bot, session_id):
 
     buttons = []
     for i in range(1, len(worker_bots) + 1):
-        buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_workers:{session_id}:{i}"))
+        buttons.append(InlineKeyboardButton(str(i), callback_data=f"fwd_workers:{session_id}:{i}"))
 
     # create a grid of buttons
     button_grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
     
     # Add "Use All", "Skip", and "Cancel" buttons
-    button_grid.append([InlineKeyboardButton("✨ Use All", callback_data=f"select_workers:{session_id}:{len(worker_bots)}")])
+    button_grid.append([InlineKeyboardButton("✨ Use All", callback_data=f"fwd_workers:{session_id}:{len(worker_bots)}")])
     button_grid.append([
-        InlineKeyboardButton("Skip", callback_data=f"select_workers:{session_id}:0"),
+        InlineKeyboardButton("Skip", callback_data=f"fwd_workers:{session_id}:0"),
         InlineKeyboardButton("« Cancel", callback_data="close_btn")
     ])
 
@@ -286,15 +286,26 @@ async def ask_for_workers(bot, session_id):
         reply_markup=InlineKeyboardMarkup(button_grid)
     )
 
-@Client.on_callback_query(filters.regex(r"^select_workers:"))
-async def select_workers_callback(bot, query):
+@Client.on_callback_query(filters.regex(r"^fwd_workers:"))
+async def cb_select_workers(bot, query):
+    """
+    Handles the user's selection of how many worker bots to use.
+    """
     try:
-        _, session_id, num_workers_str = query.data.split(":", 2)
+        # Use a more robust split method to avoid errors.
+        parts = query.data.split(":")
+        if len(parts) != 3:
+            # Handle cases where the data might be malformed.
+            await query.answer("An error occurred with the selection data.", show_alert=True)
+            return
+
+        action, session_id, num_workers_str = parts
         num_workers = int(num_workers_str)
         
         await query.message.delete()
         await show_final_confirmation(bot, session_id, num_workers)
-    except ValueError:
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing worker selection callback: {e}", exc_info=True)
         await query.answer("Invalid selection.", show_alert=True)
 
 
@@ -330,3 +341,4 @@ async def close_callback(bot, query):
     if not temp.lock.get(user_id):
         temp.USER_STATES.pop(user_id, None)
     await query.message.delete()
+
