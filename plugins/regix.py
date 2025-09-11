@@ -10,7 +10,10 @@ from config import Config, temp
 from translation import Translation
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode, ChatMemberStatus
-from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty, UserNotParticipant
+from pyrogram.errors import (
+    FloodWait, MessageNotModified, RPCError, MediaEmpty, 
+    UserNotParticipant, PeerIdInvalid
+)
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message, ChatPrivileges
 from itertools import cycle
 
@@ -91,20 +94,6 @@ async def pub_(bot, cb):
         try:
             main_worker_client = await start_clone_bot(CLIENT.client(main_worker_config), main_worker_config)
             
-            # **FIX:** First, verify the main worker can access the target chat.
-            try:
-                await main_worker_client.get_chat(i.TO)
-            except Exception:
-                await msg_edit(m,
-                    "❌ **Error:** The **Main Worker Bot** could not access the target channel.\n\n"
-                    "Please ensure you have:\n"
-                    "1. Added the Main Worker Bot to the target channel.\n"
-                    "2. Promoted it with **'Add New Admins'** permission."
-                )
-                all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
-                await stop_all(all_clients_to_stop, user_id, frwd_id, m)
-                return
-
             await msg_edit(m, "Main worker is verifying other workers...")
             for worker_client in worker_clients:
                 try:
@@ -114,9 +103,17 @@ async def pub_(bot, cb):
                 except UserNotParticipant:
                     await main_worker_client.add_chat_members(i.TO, worker_client.me.id)
                     await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
-
+        
+        except PeerIdInvalid:
+            await msg_edit(m,
+                "❌ **Configuration Error:** The **Main Worker Bot** could not find the target channel.\n\n"
+                "**Solution:** Please ensure the **Main Worker Bot** has been **manually added** as a member to the target channel."
+            )
+            all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
+            await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+            return
         except Exception as e:
-            await msg_edit(m, f"Failed to add worker bots as admins: {e}", wait=True)
+            await msg_edit(m, f"An error occurred while setting up worker bots: `{e}`\n\nPlease ensure the Main Worker Bot has 'Add New Admins' permission in the target channel.", wait=True)
             all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
             await stop_all(all_clients_to_stop, user_id, frwd_id, m)
             return
