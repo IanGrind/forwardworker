@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 SESSION_STRING_SIZE = 351
 
 async def start_clone_bot(FwdBot, bot_data):
+   # This function now correctly receives bot_data but doesn't need to use it here.
+   # The FwdBot is already configured from the CLIENT class.
    await FwdBot.start()
    return FwdBot
 
@@ -38,7 +40,8 @@ class CLIENT:
     token = token_match.group(1)
     
     try:
-        async with Client(name=str(uuid4()), api_id=self.api_id, api_hash=self.api_hash, bot_token=token, in_memory=True) as _client:
+        # Use self.client() here to properly create the client instance
+        async with self.client({'token': token, 'is_bot': True}) as _client:
             _bot = await _client.get_me()
         
         if await db.is_bot_exist(user_id, _bot.id):
@@ -61,7 +64,8 @@ class CLIENT:
     token = token_match.group(1)
 
     try:
-        async with Client(name=str(uuid4()), api_id=self.api_id, api_hash=self.api_hash, bot_token=token, in_memory=True) as _client:
+        # Use self.client() here
+        async with self.client({'token': token, 'is_bot': True}) as _client:
             _bot = await _client.get_me()
         
         if await db.is_worker_bot_exist(user_id, _bot.id):
@@ -83,7 +87,8 @@ class CLIENT:
         return False
         
     try:
-        async with Client(name=str(uuid4()), api_id=self.api_id, api_hash=self.api_hash, session_string=session_string, in_memory=True) as client:
+        # Use self.client() here
+        async with self.client({'session': session_string, 'is_bot': False}) as client:
             user = await client.get_me()
 
         if await db.is_bot_exist(user_id, user.id):
@@ -103,6 +108,9 @@ class CLIENT:
         await msg.reply_text(f"<b>⚠️ An unexpected error occurred:</b>\n`{e}`")
         logger.error(f"Error adding session string: {e}", exc_info=True)
         return False
+
+# Create a single instance of the class to be used everywhere
+CLIENT = CLIENT()
 
 async def update_configs(user_id, key, value):
     configs = await db.get_configs(user_id)
