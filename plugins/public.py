@@ -12,8 +12,13 @@ from .test import CLIENT
 from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+import string
 
 logger = logging.getLogger(__name__)
+
+def generate_short_id(length=8):
+    """Generates a short random alphanumeric ID."""
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 # --- Helper Functions ---
 def parse_message_input(message):
@@ -22,7 +27,7 @@ def parse_message_input(message):
         return None, None, "Invalid input. A message link or forwarded message is required."
 
     if message.text and not message.forward_date:
-        regex = re.compile(r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)$")
+        regex = re.compile(r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z0-9]+)/(\d+)$")
         match = regex.match(message.text.replace("?single", ""))
         if not match:
             return None, None, 'Invalid Link.'
@@ -250,13 +255,13 @@ async def range_selection_callbacks(bot, query):
         await query.message.delete()
         final_callback = session.get('final_callback')
         if final_callback == 'fwd_final':
-            await ask_for_workers(bot, session_id)
+            await ask_for_workers(bot, query, session_id)
         elif final_callback == 'uneq_final':
             from plugins.unequify import prompt_type_selection
             await prompt_type_selection(bot, query, session_id)
 
 
-async def ask_for_workers(bot, session_id):
+async def ask_for_workers(bot, query, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
 
@@ -264,7 +269,7 @@ async def ask_for_workers(bot, session_id):
     worker_bots = await db.get_worker_bots(user_id)
 
     if not worker_bots:
-        return await show_final_confirmation(bot, session_id, 0)
+        return await show_final_confirmation(bot, query, session_id, 0)
 
     buttons = []
     for i in range(1, len(worker_bots) + 1):
@@ -288,24 +293,20 @@ async def ask_for_workers(bot, session_id):
 
 @Client.on_callback_query(filters.regex(r"^fwd_workers:"))
 async def cb_select_workers(bot, query):
-    """
-    Handles the user's selection of how many worker bots to use.
-    """
     try:
         parts = query.data.split(":")
         session_id = parts[1]
         num_workers = int(parts[2])
         
-        await query.answer()
         await query.message.delete()
-        await show_final_confirmation(bot, session_id, num_workers)
+        await show_final_confirmation(bot, query, session_id, num_workers)
     except (ValueError, IndexError) as e:
         logger.error(f"Error parsing worker selection callback: {e}", exc_info=True)
         await query.answer("Invalid selection.", show_alert=True)
 
 
-async def show_final_confirmation(bot, session_id, num_workers):
-    user_id = bot.me.id
+async def show_final_confirmation(bot, query, session_id, num_workers):
+    user_id = query.from_user.id
     try:
         session = temp.RANGE_SESSIONS.get(session_id)
         if not session:
@@ -316,7 +317,6 @@ async def show_final_confirmation(bot, session_id, num_workers):
             )
             return
 
-        user_id = session['user_id']
         bot_id = temp.FORWARD_BOT_ID.get(user_id)
         if not bot_id:
             await bot.send_message(user_id, "Error: Bot selection lost. Please start the process again.")
@@ -326,15 +326,13 @@ async def show_final_confirmation(bot, session_id, num_workers):
         to_title = next((c['title'] for c in channels if c['chat_id'] == session['to_chat_id']), 'Unknown')
         
         message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
-        forward_id = str(uuid4())
-
-        # Store the mapping and create a shorter callback data string
-        temp.SESSIONS_MAP[forward_id] = session_id
+        
+        forward_id = generate_short_id()
+        session['num_workers'] = num_workers
+        temp.RANGE_SESSIONS[forward_id] = session # Map the short ID to the session data
         
         STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
         
-        temp.RANGE_SESSIONS[session_id]['num_workers'] = num_workers
-
         await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
                 botname=_bot.get('name', 'N/A'), botuname=_bot.get('username', ''),
                 from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text) + f"\n\n**Worker Bots:** `{num_workers}`",
