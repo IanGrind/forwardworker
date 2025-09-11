@@ -9,7 +9,7 @@ from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT
-from .unequify import process_unequify_target  # Import function for unequify logic
+from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from pyrogram.errors import PeerIdInvalid
@@ -27,7 +27,7 @@ def parse_message_input(message):
         chat_id = f"-100{match.group(3)}" if match.group(3).isdigit() else match.group(3)
         return chat_id, int(match.group(4)), None
     elif message.forward_from_chat: return message.forward_from_chat.id, message.forward_from_message_id, None
-    elif message.forward_from: # Handle forwards from users (who hide their account) or restricted channels
+    elif message.forward_from:
          return None, None, "Cannot forward from this source. It may be a restricted channel or a user who has hidden their account."
     return None, None, "Could not identify the source. Please send a valid message link or forward a message from the source chat."
 
@@ -35,7 +35,7 @@ def parse_message_input(message):
 async def run(bot, message):
     user_id = message.from_user.id
     if temp.lock.get(user_id): return await message.reply("A task is in progress.")
-    temp.USER_STATES.pop(user_id, None) # Clear any previous state
+    temp.USER_STATES.pop(user_id, None)
     bots = await db.get_bots(user_id)
     if not bots: return await message.reply("Add a bot or userbot in /settings.")
     if len(bots) == 1:
@@ -64,10 +64,6 @@ async def cb_select_target(bot, query):
     prompt = await query.message.edit_text(Translation.FROM_MSG)
     temp.USER_STATES[query.from_user.id] = {"state": "awaiting_source", "to_chat_id": int(query.data.split('_')[-1]), "prompt_message_id": prompt.id}
 
-# ===================================================================================================================================
-# ============================================ REBUILT STATEFUL MESSAGE HANDLER ===================================================
-# ===================================================================================================================================
-
 @Client.on_message(filters.private & filters.incoming, group=-1)
 async def stateful_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
@@ -75,83 +71,80 @@ async def stateful_message_handler(bot: Client, message: Message):
     if not state:
         return
 
-    # Universal cancel command
     if message.text and message.text.lower() == "/cancel":
-        if state.get("prompt_message_id"):
-            try: await bot.delete_messages(user_id, state["prompt_message_id"])
-            except Exception: pass
-        if state.get("prompt_message"): # For unequify which stores the full message object
-            try: await state["prompt_message"].delete()
+        prompt_id = state.get("prompt_message_id")
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
             except Exception: pass
         temp.USER_STATES.pop(user_id, None)
         return await message.reply(Translation.CANCEL)
 
     state_type = state.get("state")
-
-    # Clean up the prompt message
-    if state.get("prompt_message_id"):
-        try: await bot.delete_messages(user_id, state["prompt_message_id"])
+    prompt_message_id = state.get("prompt_message_id")
+    if prompt_message_id:
+        try: await bot.delete_messages(user_id, prompt_message_id)
         except Exception: pass
-    if state.get("prompt_message"):
-        try: await state["prompt_message"].delete()
-        except Exception: pass
-
-    # --- STATE: Awaiting Source Channel for /forward ---
+    
     if state_type == "awaiting_source":
         from_chat, end_id, error = parse_message_input(message)
-        temp.USER_STATES.pop(user_id, None) # Clear state after processing
-        if error:
-            return await message.reply(error)
-
-        from_title = "Private Chat" # Default title
+        temp.USER_STATES.pop(user_id, None)
+        if error: return await message.reply(error)
+        
+        from_title = "Private Chat"
         try:
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
-            if not bot_id:
-                return await message.reply("⚠️ Error: Bot selection lost. Please start over with /forward.")
+            if not bot_id: return await message.reply("⚠️ Error: Bot selection lost. Please start over.")
             bot_config = await db.get_bot(user_id, bot_id)
-            if not bot_config:
-                return await message.reply("⚠️ Error: Selected bot configuration not found.")
+            if not bot_config: return await message.reply("⚠️ Error: Selected bot not found.")
             
-            # Use the selected bot/userbot to get chat details
             async with CLIENT().client(bot_config) as temp_client:
-                chat_obj = await temp_client.get_chat(from_chat)
-                from_title = chat_obj.title
+                from_title = (await temp_client.get_chat(from_chat)).title
         except PeerIdInvalid:
-             return await message.reply("⚠️ **Error:** The selected bot/userbot is not a member of the source channel. Please add it and try again.")
+             return await message.reply("⚠️ **Error:** The selected bot/userbot is not in the source channel.")
         except Exception as e:
-            logger.error(f"Could not get chat title for {from_chat} using the selected bot. Error: {e}", exc_info=True)
-            await message.reply(f"Could not verify source channel access. Using default name.\n`{e}`")
+            logger.error(f"Could not get chat title for {from_chat}. Error: {e}", exc_info=True)
+            await message.reply(f"Could not verify source channel. Using default name.\n`{e}`")
         
         await start_range_selection(bot, message, from_chat, from_title, state["to_chat_id"], 1, end_id)
 
-    # --- STATE: Awaiting manual channel for /unequify ---
-    elif state_type == "awaiting_unequify_manual_target":
-        target_input = message.text
+    elif state_type == "awaiting_range_edit":
+        session_id = state.get("session_id")
+        part_to_edit = state.get("part_to_edit")
+        
+        temp.USER_STATES.pop(user_id, None)
+        try: await message.delete()
+        except Exception: pass
+
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session: return
+
+        if not message.text or not message.text.isdigit():
+            await bot.send_message(user_id, "Invalid ID. Please provide only numbers.")
+            await update_range_message(bot, session_id) # Resend the menu
+            return
+
+        session[f"{part_to_edit}_id"] = int(message.text)
+        await update_range_message(bot, session_id)
+
+    elif state_type in ["awaiting_unequify_manual_target", "awaiting_unequify_chat_selection"]:
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not userbot_id:
             temp.USER_STATES.pop(user_id, None)
-            return await message.reply("⚠️ Error: Userbot selection lost. Please start over with /unequify.")
-        # Re-use the existing logic by calling it
+            return await message.reply("⚠️ Error: Userbot selection lost. Start over with /unequify.")
+        
+        if state_type == "awaiting_unequify_manual_target":
+            target_input = message.text
+        else: # awaiting_unequify_chat_selection
+            selection = message.text
+            chats = state.get("chats", {})
+            selected_chat = chats.get(selection) or chats.get(f"-100{selection}")
+            if not selected_chat:
+                return await message.reply("Invalid selection. Please reply with the number or ID from the list.")
+            target_input = selected_chat.id
+        
         await process_unequify_target(bot, message, user_id, userbot_id, target_input)
         temp.USER_STATES.pop(user_id, None)
-
-    # --- STATE: Awaiting chat selection for /unequify ---
-    elif state_type == "awaiting_unequify_chat_selection":
-        selection = message.text
-        chats = state.get("chats", {})
-        selected_chat = chats.get(selection) or chats.get(f"-100{selection}")
         
-        if selected_chat:
-            userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
-            if not userbot_id:
-                 temp.USER_STATES.pop(user_id, None)
-                 return await message.reply("⚠️ Error: Userbot selection lost. Please start over with /unequify.")
-            await process_unequify_target(bot, message, user_id, userbot_id, selected_chat.id)
-        else:
-            await message.reply("Invalid selection. Please reply with the number or ID from the list.")
-            # We don't pop the state here so the user can try again.
-        
-    # --- STATES: From /settings ---
     elif state_type == "awaiting_bot_token":
         await CLIENT().add_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
@@ -172,22 +165,12 @@ async def stateful_message_handler(bot: Client, message: Message):
             await message.reply("Please forward a message from the channel.")
         temp.USER_STATES.pop(user_id, None)
 
-# ===================================================================================================================================
-# ================================================ END OF STATEFUL HANDLER ========================================================
-# ===================================================================================================================================
-
-
-@Client.on_callback_query(filters.regex(r"^range_confirm_fwd_final_"))
-async def range_confirm_callback(bot, query):
-    session_id = query.data.split('_')[-1]
-    await query.message.delete()
-    await ask_for_workers(bot, query, session_id)
-
 async def ask_for_workers(bot, query, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
     workers = await db.get_worker_bots(query.from_user.id)
     if not workers: return await show_final_confirmation(bot, query, session_id, 0)
+    
     buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers:{session_id}:{i}")] for i in range(1, len(workers) + 1)]
     grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
     grid.append([InlineKeyboardButton("✨ Use All", callback_data=f"fwd_workers:{session_id}:{len(workers)}")])
@@ -211,12 +194,13 @@ async def show_final_confirmation(bot, query, session_id, num_workers):
     
     forward_id = generate_short_id()
     session['num_workers'] = num_workers
-    temp.RANGE_SESSIONS[forward_id] = session
+    # We move the session data to a new key to avoid conflicts if the user starts another task
+    temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
     
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
     
     await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
-        botname=_bot['name'], botuname=_bot['username'], from_chat=session['from_title'], to_chat=to_title,
+        botname=_bot['name'], botuname=_bot.get('username', 'N/A'), from_chat=session['from_title'], to_chat=to_title,
         message_range=f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}") + 
         f"\n\n**Worker Bots:** `{num_workers}`",
         reply_markup=InlineKeyboardMarkup([
