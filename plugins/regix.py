@@ -51,16 +51,20 @@ async def pub_(bot, cb):
     await msg_edit(m, "Starting clients...")
     
     clients = []
+    main_client = None
     try:
         main_client = await start_clone_bot(CLIENT.client(_bot), _bot)
-        clients.append(main_client)
         
+        worker_clients = []
         if num_workers > 0:
             worker_configs = await db.get_worker_bots(user_id)
             for worker_config in worker_configs[:num_workers]:
                 worker_client = await start_clone_bot(CLIENT.client(worker_config), worker_config)
-                clients.append(worker_client)
-                
+                worker_clients.append(worker_client)
+        
+        # The client pool for sending is either the worker bots or the main client if no workers are used
+        clients = worker_clients if worker_clients else [main_client]
+
     except Exception as e:
         return await m.edit(f"Failed to start clients: {e}")
 
@@ -70,7 +74,8 @@ async def pub_(bot, cb):
         from_title, to_title = from_chat_details.title, to_chat_details.title
     except Exception as e:
         await msg_edit(m, f"Error accessing source/target chat: {e}\n\nMake sure your bot/userbot has access.", retry_btn(frwd_id, session_id), True)
-        await stop_all(clients, user_id, frwd_id, m)
+        all_clients_to_stop = [main_client] + clients if main_client else clients
+        await stop_all(all_clients_to_stop, user_id, frwd_id, m)
         return
 
     if user_id not in temp.ACTIVE_TASKS: temp.ACTIVE_TASKS[user_id] = {}
@@ -106,6 +111,10 @@ async def pub_(bot, cb):
                 continue
 
             for message in messages:
+                if temp.CANCEL.get(frwd_id):
+                    final_status = "cancelled"
+                    break
+
                 elapsed_time = time.time() - i.start
                 update_interval = 5 if elapsed_time < 60 else 15
                 if time.time() - last_update_time > update_interval:
@@ -118,33 +127,30 @@ async def pub_(bot, cb):
                     sts.add('deleted')
                     continue
                 
-                # --- APPLYING MESSAGE TYPE FILTERS ---
                 if message.media and str(message.media.value) in filters_to_apply:
                     sts.add('filtered')
                     continue
                 if not message.media and "text" in filters_to_apply:
                     sts.add('filtered')
                     continue
-                # ------------------------------------
 
                 try:
                     current_client = next(client_cycler)
                     if forward_tag:
-                        forward_batch.append(message.id)
-                        if len(forward_batch) >= 100:
-                            await current_client.forward_messages(
-                                chat_id=i.TO, from_chat_id=i.FROM,
-                                message_ids=forward_batch, protect_content=protect
-                            )
-                            sts.add('total_files', len(forward_batch))
-                            forward_batch.clear()
-                            await asyncio.sleep(max(delay, 2))
+                         await current_client.forward_messages(
+                            chat_id=i.TO, from_chat_id=i.FROM,
+                            message_ids=message.id, protect_content=protect
+                        )
+                         sts.add('total_files')
                     else:
                         new_caption = custom_caption(message, caption)
-                        await message.copy(
-                            chat_id=i.TO, caption=new_caption,
-                            reply_markup=button, protect_content=protect,
-                            client=current_client # Pass the client to the copy method
+                        await current_client.copy_message(
+                            chat_id=i.TO,
+                            from_chat_id=i.FROM,
+                            message_id=message.id,
+                            caption=new_caption,
+                            reply_markup=button,
+                            protect_content=protect
                         )
                         sts.add('total_files')
                 except FloodWait as e:
@@ -152,30 +158,16 @@ async def pub_(bot, cb):
                     await edit_progress(m, sts, sts.get('status'))
                     await asyncio.sleep(e.value + 2)
                     sts.set_status("running")
-                    try:
-                        current_client = next(client_cycler)
-                        if forward_tag: 
-                            sts.add('failed', len(forward_batch))
-                            forward_batch.clear()
-                        else: 
-                            await message.copy(chat_id=i.TO, caption=new_caption, reply_markup=button, protect_content=protect, client=current_client)
-                            sts.add('total_files')
-                    except Exception as e_retry:
-                        logger.error(f"Retry failed for message {message.id}: {e_retry}")
-                        sts.add('failed')
+                    # No retry logic here to keep it simple, just mark as failed and move on
+                    sts.add('failed')
                 except Exception as e:
                     logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
                     sts.add('failed')
 
-                if not forward_tag:
-                    await asyncio.sleep(delay)
-        
-        if forward_tag and forward_batch and not temp.CANCEL.get(frwd_id):
-            await main_client.forward_messages(
-                chat_id=i.TO, from_chat_id=i.FROM,
-                message_ids=forward_batch, protect_content=protect
-            )
-            sts.add('total_files', len(forward_batch))
+                await asyncio.sleep(delay)
+
+            if final_status == "cancelled":
+                break
 
         if not temp.CANCEL.get(frwd_id):
             final_status = "completed"
@@ -184,7 +176,8 @@ async def pub_(bot, cb):
         logger.error(f"Main forwarding loop error: {e}", exc_info=True)
     finally:
         await edit_progress(m, sts, final_status)
-        await stop_all(clients, user_id, frwd_id, m)
+        all_clients_to_stop = [main_client] + clients if main_client else clients
+        await stop_all(all_clients_to_stop, user_id, frwd_id, m)
 
 
 # --- Callbacks ---
@@ -276,7 +269,9 @@ async def edit_progress(msg, sts, status):
 
 async def stop_all(clients, user_id, task_id, message_obj):
     for client in clients:
-        try: await client.stop()
+        try: 
+            if client.is_connected:
+                await client.stop()
         except: pass
     if temp.ACTIVE_TASKS.get(user_id, {}).get(task_id): del temp.ACTIVE_TASKS[user_id][task_id]
     temp.CANCEL.pop(task_id, None)
