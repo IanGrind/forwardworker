@@ -41,43 +41,40 @@ async def pub_(bot, cb: CallbackQuery):
         manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
         
         target_chat_id = session['to_chat_id']
-        try:
-            await manager_client.get_chat(target_chat_id)
-        except PeerIdInvalid:
-            return await m.edit(f"**Setup Error:**\nManager Userbot (`{manager_config['name']}`) is not in the target channel. Please add it and try again.")
-        except Exception as e:
-            return await m.edit(f"**Setup Error:**\nCould not access target channel with Manager Userbot. Error: `{e}`")
-
-        await m.edit("`Step 1/3: Starting Worker Bots...`")
-        for i, config in enumerate(worker_configs):
-            await m.edit(f"`Step 1/3: Starting Worker Bot {i+1}/{len(worker_configs)}...`")
+        
+        await m.edit("`Step 1/3: Starting Worker Bots (this may take a moment)...`")
+        # We start the worker clients early to get their usernames.
+        for config in worker_configs:
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
 
-        await m.edit("`Step 2/3: Manager is promoting workers...`")
+        await m.edit("`Step 2/3: Manager is adding and promoting workers...`")
         
-        # --- THIS IS THE CORE FIX ---
-        # We now grant a standard set of safe, non-destructive admin privileges
-        # to the worker bots. This satisfies the Telegram API's requirements.
         worker_privileges = ChatPrivileges(
             can_post_messages=True,
             can_edit_messages=True,
-            can_delete_messages=True,
-            can_invite_users=True
+            can_delete_messages=True
         )
 
         for i, worker in enumerate(worker_clients):
-            await m.edit(f"`Step 2/3: Promoting worker {i+1}/{len(worker_clients)}...`")
+            worker_username = worker.me.username
+            await m.edit(f"`Step 2/3: Promoting @{worker_username} ({i+1}/{len(worker_clients)})...`")
+            
+            # --- THIS IS THE CORE FIX ---
+            # The Manager Userbot now promotes the Worker Bot using its @username.
+            # This is the correct way to add a bot directly as an admin to a channel.
+            if not worker_username:
+                return await m.edit(f"**Setup Error:**\nWorker Bot `{worker.me.first_name}` does not have a public @username. Please set one in @BotFather and try again.")
+            
             try:
                 await manager_client.promote_chat_member(
                     chat_id=target_chat_id,
-                    user_id=worker.me.id,
+                    user_id=f"@{worker_username}", # Using the username string
                     privileges=worker_privileges
                 )
             except ChatAdminRequired as e:
-                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\n**Troubleshooting:**\n1. Ensure the Manager Userbot is an admin in the target channel.\n2. Ensure the Manager Userbot has the 'Add New Admins' permission.\n3. Check if the channel owner has 'Remain Anonymous' enabled, as this can sometimes cause permission issues.")
+                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote `@{worker_username}`.\nError: `{e}`\n\nPlease ensure the Manager Userbot has the 'Add New Admins' permission in the target channel.")
             except Exception as e:
-                 return await m.edit(f"**Setup Error:**\nAn unexpected error occurred while promoting worker `{worker.me.first_name}`.\nError: `{e}`")
-
+                 return await m.edit(f"**Setup Error:**\nAn unexpected error occurred while promoting `@{worker_username}`.\nError: `{e}`")
 
         await m.edit("`Step 3/3: Starting Fetcher Client...`")
         fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
