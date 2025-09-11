@@ -50,10 +50,13 @@ async def settings_query(bot, query):
         elif type=="bots":
            buttons = []
            bots = await db.get_bots(user_id)
+           manager = await db.get_manager_userbot(user_id)
            for _bot in bots:
               if not _bot.get('id'): continue
               bot_name = _bot.get('name') or _bot.get('username', f"ID: {_bot['id']}")
               bot_id = _bot.get('id')
+              if manager and not _bot.get('is_bot') and manager['id'] == bot_id:
+                  bot_name = f"👑 {bot_name} (Manager)"
               buttons.append([InlineKeyboardButton(bot_name, callback_data=f"settings#editbot_{bot_id}")])
 
            buttons.append([InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot")])
@@ -105,12 +108,19 @@ async def settings_query(bot, query):
            uname_display = f"@{bot_uname}" if bot_uname else "Not Set"
            buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removebot_{bot_id}")],
                       [InlineKeyboardButton('« Back', callback_data="settings#bots")]]
+           if not is_bot:
+               buttons.insert(0, [InlineKeyboardButton('👑 Set as Manager Userbot', callback_data=f"settings#setmanager_{bot_id}")])
            await query.message.edit_text(TEXT.format(bot_name, bot_id, uname_display), reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif type.startswith("setmanager"):
+            bot_id = int(type.split('_')[1])
+            await db.set_manager_userbot(user_id, bot_id)
+            await query.message.edit_text("✅ Manager Userbot has been set.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data="settings#bots")]]))
 
         elif type.startswith("removebot"):
            bot_id = int(type.split('_')[1])
            await db.remove_bot(user_id, bot_id)
-           await query.message.edit_text("Bot removed. ✓", reply_markup=InlineKeyboardMarkup(buttons))
+           await query.message.edit_text("Bot/Userbot removed. ✓", reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("editchannels"):
            chat_id = type.split('_')[1]
@@ -127,17 +137,13 @@ async def settings_query(bot, query):
         elif type == "workers":
             buttons = []
             workers = await db.get_worker_bots(user_id)
-            main_worker = await db.get_main_worker(user_id)
             for worker in workers:
                 if not worker.get('id'): continue
                 worker_name = worker.get('name') or worker.get('username', f"ID: {worker['id']}")
                 worker_id = worker.get('id')
-                if main_worker and main_worker['id'] == worker_id:
-                    worker_name = f"👑 {worker_name}"
                 buttons.append([InlineKeyboardButton(worker_name, callback_data=f"settings#editworker_{worker_id}")])
 
             buttons.append([InlineKeyboardButton('+ Add Worker Bot', callback_data="settings#addworkerbot")])
-            buttons.append([InlineKeyboardButton('+ Add Main Worker Bot', callback_data="settings#addmainworker")])
             buttons.append([InlineKeyboardButton('« Back', callback_data="settings#main")])
             await query.message.edit_text(
                 "<b>֎ Worker Bots ֎</b>\n\nManage your worker bots for forwarding.",
@@ -151,11 +157,9 @@ async def settings_query(bot, query):
 
             worker_name = worker.get('name', 'N/A')
             worker_uname = worker.get('username')
-            is_bot = worker.get('is_bot', True)
-            TEXT = Translation.BOT_DETAILS if is_bot else Translation.USER_DETAILS
+            TEXT = Translation.BOT_DETAILS
             uname_display = f"@{worker_uname}" if worker_uname else "Not Set"
             buttons = [
-                [InlineKeyboardButton('Set as Main Worker', callback_data=f"settings#setmainworker_{worker_id}")],
                 [InlineKeyboardButton('- Remove', callback_data=f"settings#removeworker_{worker_id}")],
                 [InlineKeyboardButton('« Back', callback_data="settings#workers")]
             ]
@@ -171,23 +175,12 @@ async def settings_query(bot, query):
            temp.USER_STATES[user_id] = {"state": "awaiting_worker_bot_token"}
            await bot.send_message(user_id, "Forward the message from @BotFather containing the worker bot's token, or just send the token string.\n\n/cancel - to abort.")
 
-        elif type == "addmainworker":
-            await query.message.delete()
-            temp.USER_STATES[user_id] = {"state": "awaiting_main_worker_token"}
-            await bot.send_message(user_id, "Forward the message from @BotFather containing the main worker bot's token, or just send the token string.\n\n/cancel - to abort.")
-
-        elif type.startswith("setmainworker"):
-            worker_id = int(type.split('_')[1])
-            await db.set_main_worker(user_id, worker_id)
-            await query.message.edit_text("Main worker bot set. ✓", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data="settings#workers")]]))
-
     except Exception as e:
         logger.error(f"Error in settings_query: {e}", exc_info=True)
         try:
             await query.message.reply_text("An unexpected error occurred. Please try again later.")
         except:
             await bot.send_message(user_id, "An unexpected error occurred. Please try again later.")
-
 
 def main_buttons():
   buttons = [[
