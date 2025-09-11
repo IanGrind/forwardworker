@@ -1,4 +1,3 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/utils.py
 import re
 import random
 import time as tm
@@ -7,7 +6,7 @@ from uuid import uuid4
 from database import db
 from config import temp
 from translation import Translation
-from .parser import parse_buttons  # <-- FIXED IMPORT
+from .parser import parse_buttons
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 STATUS = {}
@@ -65,21 +64,17 @@ class STS:
         return self
     
     def add_to_batch(self, message_id):
-        """Adds a message ID to the current batch for forwarding."""
         batch = self.get('batch')
         if batch is not None:
             batch.append(message_id)
 
     def get_batch(self):
-        """Returns the current batch of message IDs."""
         return self.get('batch')
 
     def clear_batch(self):
-        """Clears the batch."""
         self.data[self.id]['batch'] = []
 
     def set_status(self, status):
-        """Sets the current task status (e.g., 'running', 'floodwait')."""
         self.data[self.id]['status'] = status
     
     def get_readable_time(self, seconds: int) -> str:
@@ -95,20 +90,15 @@ class STS:
        return int(no) / by
 
     async def get_data(self, user_id):
-        bot_id = temp.FORWARD_BOT_ID.get(user_id)
+        bot_id = temp.FORWARD_BOT_ID.get(user_id) or temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not bot_id:
-            bot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
-            if not bot_id:
-                raise ValueError("Bot ID not found in session.")
+            raise ValueError("Bot ID not found in session.")
 
         bot = await db.get_bot(user_id, bot_id)
         k, filters = self, await db.get_filters(user_id)
         size, configs = None, await db.get_configs(user_id)
-        if configs['duplicate']:
-           duplicate = [configs['db_uri'], self.TO]
-        else:
-           duplicate = False
-        button = parse_buttons(configs['button'] if configs['button'] else '')
+        duplicate = [configs['db_uri'], self.TO] if configs['duplicate'] else False
+        button = parse_buttons(configs.get('button'))
         if configs['file_size'] != 0:
             size = [configs['file_size'], configs['size_limit']]
 
@@ -120,7 +110,6 @@ class STS:
         }, configs['protect'], button
 
 async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id, final_callback_prefix="fwd_final"):
-    """Initiates an interactive message range selection process."""
     session_id = str(uuid4())
     temp.RANGE_SESSIONS[session_id] = {
         'user_id': message.chat.id,
@@ -137,7 +126,6 @@ async def start_range_selection(bot, message: Message, from_chat_id, from_title,
     await update_range_message(bot, session_id)
 
 async def update_range_message(bot, session_id, message_to_edit=None):
-    """Edits or sends the range selection message as a text message."""
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
 
@@ -148,7 +136,10 @@ async def update_range_message(bot, session_id, message_to_edit=None):
     )
     display_button_text = f"Range: {session['start_id']} ➔ {session['end_id']} ({order_text})"
 
-    confirm_cb = f"range_confirm_{session['final_callback']}_{session_id}"
+    # ** THIS IS THE KEY CHANGE **
+    # Standardize the callback for the confirm button
+    workflow_prefix = session['final_callback'].split('_')[0]  # 'fwd_final' becomes 'fwd'
+    confirm_cb = f"range_confirm_{workflow_prefix}_{session_id}"
 
     buttons = [
         [InlineKeyboardButton(display_button_text, callback_data=f"range_info_{session_id}")],
@@ -174,7 +165,3 @@ async def update_range_message(bot, session_id, message_to_edit=None):
         session['message_id'] = new_message.id
     except Exception as e:
         logger.error(f"Error sending/editing range message: {e}", exc_info=True)
-        try:
-            await bot.send_message(session['chat_id'], "An error occurred while displaying the menu. Please try again.")
-        except Exception as ie:
-            logger.error(f"Failed to send error message to user: {ie}")
