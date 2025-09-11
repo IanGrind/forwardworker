@@ -292,16 +292,12 @@ async def cb_select_workers(bot, query):
     Handles the user's selection of how many worker bots to use.
     """
     try:
-        # Use a more robust split method to avoid errors.
         parts = query.data.split(":")
-        if len(parts) != 3:
-            # Handle cases where the data might be malformed.
-            await query.answer("An error occurred with the selection data.", show_alert=True)
-            return
-
-        action, session_id, num_workers_str = parts
-        num_workers = int(num_workers_str)
+        session_id = parts[1]
+        num_workers = int(parts[2])
         
+        # Acknowledge the callback immediately to prevent the user from seeing a loading icon.
+        await query.answer()
         await query.message.delete()
         await show_final_confirmation(bot, session_id, num_workers)
     except (ValueError, IndexError) as e:
@@ -310,30 +306,47 @@ async def cb_select_workers(bot, query):
 
 
 async def show_final_confirmation(bot, session_id, num_workers):
-    session = temp.RANGE_SESSIONS.get(session_id)
-    if not session: return
+    user_id = bot.me.id # A placeholder in case session is lost
+    try:
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session:
+            logger.warning(f"Session {session_id} not found in show_final_confirmation.")
+            # Use query from cb_select_workers context if available, else send message.
+            # This part is tricky as query is not passed here. Let's send a new message.
+            await bot.send_message(
+                chat_id=user_id, # This is a fallback
+                text="⚠️ Your session has expired or could not be found. Please start the /forward command again."
+            )
+            return
 
-    user_id, bot_id = session['user_id'], temp.FORWARD_BOT_ID.get(session['user_id'])
-    if not bot_id: return await bot.send_message(user_id, "Error: Bot selection lost.")
+        user_id = session['user_id'] # Get correct user_id
+        bot_id = temp.FORWARD_BOT_ID.get(user_id)
+        if not bot_id:
+            await bot.send_message(user_id, "Error: Bot selection lost. Please start the process again.")
+            return
 
-    _bot, channels = await db.get_bot(user_id, bot_id), await db.get_user_channels(user_id)
-    to_title = next((c['title'] for c in channels if c['chat_id'] == session['to_chat_id']), 'Unknown')
-    
-    message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
-    forward_id = str(uuid4())
+        _bot, channels = await db.get_bot(user_id, bot_id), await db.get_user_channels(user_id)
+        to_title = next((c['title'] for c in channels if c['chat_id'] == session['to_chat_id']), 'Unknown')
+        
+        message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
+        forward_id = str(uuid4())
 
-    STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-    
-    temp.RANGE_SESSIONS[session_id]['num_workers'] = num_workers
+        STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
+        
+        temp.RANGE_SESSIONS[session_id]['num_workers'] = num_workers
 
-    await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
-            botname=_bot.get('name', 'N/A'), botuname=_bot.get('username', ''),
-            from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text) + f"\n\n**Worker Bots:** `{num_workers}`",
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}_{session_id}")],
-            [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
-        ]))
+        await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
+                botname=_bot.get('name', 'N/A'), botuname=_bot.get('username', ''),
+                from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text) + f"\n\n**Worker Bots:** `{num_workers}`",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}_{session_id}")],
+                [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
+            ]))
+    except Exception as e:
+        logger.error(f"Error in show_final_confirmation: {e}", exc_info=True)
+        await bot.send_message(user_id, f"An unexpected error occurred: `{e}`. Please try again.")
+
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
@@ -341,4 +354,3 @@ async def close_callback(bot, query):
     if not temp.lock.get(user_id):
         temp.USER_STATES.pop(user_id, None)
     await query.message.delete()
-
