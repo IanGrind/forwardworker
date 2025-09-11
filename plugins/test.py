@@ -101,6 +101,32 @@ class CLIENT:
      await db.add_bot(details)
      await msg.reply_text("Bot token added. ✓")
 
+  async def add_worker_bot(self, bot, query: Union[Message, CallbackQuery]):
+     """Handles the conversation flow for adding a new worker bot."""
+     user_id = query.from_user.id
+     msg = query
+     
+     bot_token_match = re.search(r'(\d{8,10}:[a-zA-Z0-9_-]{35})', msg.text)
+     bot_token = bot_token_match.group(1) if bot_token_match else None
+
+     if not bot_token:
+       return await msg.reply_text("No valid bot token found.")
+
+     try:
+       async with self.client(bot_token) as _client:
+          _bot = await _client.get_me()
+     except Exception as e:
+       return await msg.reply_text(f"<b>Worker Bot Error:</b> `{e}`\n\nPlease check the token.")
+     
+     if await db.is_worker_bot_exist(user_id, _bot.id):
+         return await msg.reply_text("This worker bot has already been added.")
+
+     details = {
+       'id': _bot.id, 'is_bot': True, 'user_id': user_id,
+       'name': _bot.first_name, 'token': bot_token, 'username': _bot.username 
+     }
+     await db.add_worker_bot(details)
+     await msg.reply_text("Worker bot added. ✓")
     
   async def add_session(self, bot, query: Union[Message, CallbackQuery]):
      """Handles the conversation flow for adding a new userbot session."""
@@ -170,4 +196,3 @@ async def update_configs(user_id, key, value):
     elif key in current.get('filters', {}):
        current['filters'][key] = value
     await db.update_configs(user_id, current)
-
