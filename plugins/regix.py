@@ -9,9 +9,9 @@ from .test import CLIENT, start_clone_bot
 from config import Config, temp
 from translation import Translation
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+from pyrogram.enums import ParseMode, ChatMemberStatus
+from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty, UserNotParticipant
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message, ChatPrivileges
 from itertools import cycle
 
 CLIENT = CLIENT()
@@ -46,25 +46,21 @@ async def pub_(bot, cb):
         return await msg_edit(m, "You haven't added a bot/userbot. Please do so in /settings.", wait=True)
 
     delay = data_params.get('forward_delay', 0.5)
-    filters_to_apply = data_params.get('filters', []) # Get the filters
+    filters_to_apply = data_params.get('filters', [])
 
     await msg_edit(m, "Starting clients...")
     
-    clients = []
     main_client = None
+    worker_clients = []
     try:
         main_client = await start_clone_bot(CLIENT.client(_bot), _bot)
         
-        worker_clients = []
         if num_workers > 0:
             worker_configs = await db.get_worker_bots(user_id)
             for worker_config in worker_configs[:num_workers]:
                 worker_client = await start_clone_bot(CLIENT.client(worker_config), worker_config)
                 worker_clients.append(worker_client)
-        
-        # The client pool for sending is either the worker bots or the main client if no workers are used
-        clients = worker_clients if worker_clients else [main_client]
-
+                
     except Exception as e:
         return await m.edit(f"Failed to start clients: {e}")
 
@@ -74,9 +70,38 @@ async def pub_(bot, cb):
         from_title, to_title = from_chat_details.title, to_chat_details.title
     except Exception as e:
         await msg_edit(m, f"Error accessing source/target chat: {e}\n\nMake sure your bot/userbot has access.", retry_btn(frwd_id, session_id), True)
-        all_clients_to_stop = [main_client] + clients if main_client else clients
+        all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
         await stop_all(all_clients_to_stop, user_id, frwd_id, m)
         return
+
+    # Auto-add worker bots as admins
+    if num_workers > 0:
+        main_worker_config = await db.get_main_worker(user_id)
+        if not main_worker_config:
+            await msg_edit(m, "Main worker bot not set. Please set one in /settings.", wait=True)
+            all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
+            await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+            return
+        
+        try:
+            main_worker_client = await start_clone_bot(CLIENT.client(main_worker_config), main_worker_config)
+            
+            for worker_client in worker_clients:
+                try:
+                    member = await main_worker_client.get_chat_member(i.TO, worker_client.me.id)
+                    if member.status != ChatMemberStatus.ADMINISTRATOR:
+                        await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
+                except UserNotParticipant:
+                    await main_worker_client.add_chat_members(i.TO, worker_client.me.id)
+                    await main_worker_client.promote_chat_member(i.TO, worker_client.me.id, privileges=ChatPrivileges(can_post_messages=True))
+            
+            await main_worker_client.stop()
+
+        except Exception as e:
+            await msg_edit(m, f"Failed to add worker bots as admins: {e}", wait=True)
+            all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
+            await stop_all(all_clients_to_stop, user_id, frwd_id, m)
+            return
 
     if user_id not in temp.ACTIVE_TASKS: temp.ACTIVE_TASKS[user_id] = {}
     temp.ACTIVE_TASKS[user_id][frwd_id] = { "process": m, "details": {"type": "Forwarding", "from": from_title, "to": to_title} }
@@ -84,9 +109,9 @@ async def pub_(bot, cb):
     temp.forwardings += 1
     
     final_status = "error"
-    forward_batch = []
     last_update_time = time.time()
     
+    clients = worker_clients if worker_clients else [main_client]
     client_cycler = cycle(clients)
 
     try:
@@ -158,7 +183,6 @@ async def pub_(bot, cb):
                     await edit_progress(m, sts, sts.get('status'))
                     await asyncio.sleep(e.value + 2)
                     sts.set_status("running")
-                    # No retry logic here to keep it simple, just mark as failed and move on
                     sts.add('failed')
                 except Exception as e:
                     logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
@@ -176,7 +200,7 @@ async def pub_(bot, cb):
         logger.error(f"Main forwarding loop error: {e}", exc_info=True)
     finally:
         await edit_progress(m, sts, final_status)
-        all_clients_to_stop = [main_client] + clients if main_client else clients
+        all_clients_to_stop = [main_client] + worker_clients if main_client else worker_clients
         await stop_all(all_clients_to_stop, user_id, frwd_id, m)
 
 
@@ -198,7 +222,7 @@ async def get_frwd_status(bot, query):
     await query.answer(
         Translation.STATUS_ALERT.format(
             status=i.status, fetched=i.fetched, total=i.total, forwarded=i.total_files,
-            failed=i.failed, remaining=(i.total - i.fetched), skipped=i.deleted + i.duplicate + i.filtered, # Added filtered to skipped
+            failed=i.failed, remaining=(i.total - i.fetched), skipped=i.deleted + i.duplicate + i.filtered,
             percentage=percentage, eta=eta
         ),
         show_alert=True
@@ -232,12 +256,11 @@ async def edit_progress(msg, sts, status):
 
         text = Translation.TEXT.format(
             status=status, fetched=i.fetched, total=i.total, forwarded=i.total_files,
-            failed=i.failed, skipped=i.deleted + i.filtered, duplicates=i.duplicate, # Added filtered to skipped
+            failed=i.failed, skipped=i.deleted + i.filtered, duplicates=i.duplicate,
             percentage=percentage, eta=eta, progress_bar=progress_bar
         )
         button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', f'cancel_task_{i.id}')]])
     else:
-        # --- NEW CLASSY FORMATTING FOR FINAL MESSAGE ---
         end_time = time.time()
         time_taken = sts.get_readable_time(int(end_time - i.start))
         total_skipped = i.deleted + i.duplicate + i.filtered
@@ -248,7 +271,7 @@ async def edit_progress(msg, sts, status):
         elif status == "cancelled":
             title = "❌ <b>Task Cancelled</b>"
             line = "━━━━━━━━━━━━━━━━━━━━"
-        else:  # error
+        else:
             title = "⚠️ <b>An Error Occurred</b>"
             line = "━━━━━━━━━━━━━━━━━━━━"
 
@@ -263,7 +286,6 @@ async def edit_progress(msg, sts, status):
             f"  Failed:    <code>{i.failed}</code>"
         )
         button = InlineKeyboardMarkup([[InlineKeyboardButton("Done!", callback_data="close_btn")]])
-        # ---------------------------------------------
 
     await msg_edit(msg, text, button)
 
