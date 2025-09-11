@@ -1,4 +1,4 @@
-import rere
+import re
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def parse_buttons(text: str):
