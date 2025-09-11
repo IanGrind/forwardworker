@@ -1,5 +1,5 @@
 import motor.motor_asyncio
-from config import Config, temp
+from config import Config
 
 db = None
 
@@ -64,6 +64,9 @@ class Database:
 
     async def add_bot(self, datas):
        await self.bot.insert_one(datas)
+       
+    async def is_bot_exist(self, user_id, bot_id):
+        return bool(await self.bot.find_one({'user_id': user_id, 'id': bot_id}))
 
     async def remove_bot(self, user_id, bot_id):
        await self.bot.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
@@ -105,16 +108,9 @@ class Database:
     async def get_worker_bots(self, user_id):
         return [w async for w in self.worker.find({'user_id': user_id})]
     
-    async def get_main_worker(self, user_id):
-        # Assuming the first worker bot added is the main one for now
-        workers = await self.get_worker_bots(user_id)
-        if workers:
-            return workers[0]
-        return None
-
     async def is_worker_bot_exist(self, user_id, bot_id):
         return bool(await self.worker.find_one({'user_id': user_id, 'id': bot_id}))
-    
+
     async def get_worker_bot(self, user_id, bot_id):
         return await self.worker.find_one({'user_id': user_id, 'id': bot_id})
 
