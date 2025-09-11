@@ -53,21 +53,19 @@ async def pub_(bot, cb: CallbackQuery):
             await m.edit(f"`Step 1/3: Starting Worker Bot {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
 
-        await m.edit("`Step 2/3: Manager is adding workers to the target channel...`")
-        for i, worker in enumerate(worker_clients):
-            await m.edit(f"`Step 2/3: Adding worker {i+1}/{len(worker_clients)}...`")
-            try:
-                await manager_client.add_chat_members(target_chat_id, worker.me.id)
-            except UserAlreadyParticipant:
-                pass
-            except Exception as e:
-                return await m.edit(f"**Setup Error:**\nManager Userbot failed to add worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add Members' permission.")
-
+        # --- THE CORE FIX IS HERE ---
+        # The illegal 'add_chat_members' step has been removed.
+        # We now proceed directly to promotion.
         await m.edit("`Step 2/3: Manager is promoting workers...`")
         for i, worker in enumerate(worker_clients):
             await m.edit(f"`Step 2/3: Promoting worker {i+1}/{len(worker_clients)}...`")
             try:
-                await manager_client.promote_chat_member(target_chat_id, worker.me.id, privileges=ChatPrivileges(can_post_messages=True))
+                # This single call now correctly adds and promotes the bot in one step.
+                await manager_client.promote_chat_member(
+                    chat_id=target_chat_id,
+                    user_id=worker.me.id,
+                    privileges=ChatPrivileges(can_post_messages=True)
+                )
             except Exception as e:
                  return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add New Admins' permission.")
 
