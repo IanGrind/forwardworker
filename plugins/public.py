@@ -152,6 +152,7 @@ async def stateful_message_handler(bot: Client, message: Message):
             await message.reply("That was not a valid forwarded message. Please try again.")
             await show_settings_menu(bot, message, 'channels')
 
+
 @Client.on_callback_query(filters.regex(r"^(range_|noop)"))
 async def range_menu_handler(bot: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -223,8 +224,17 @@ async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
         if manager and workers:
             report += "\n\n✅ **System Ready.** Please select the number of workers to use for this task."
             
-            buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
+            # This logic creates a flat list of buttons first.
+            buttons = [
+                InlineKeyboardButton(
+                    str(i),
+                    callback_data=f"fwd_workers_{session_id}_{i}"
+                ) for i in range(1, len(workers) + 1)
+            ]
+            
+            # This correctly chunks the flat list into rows, with a maximum of 5 buttons per row.
             grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+            
             grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
             grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
             
@@ -236,6 +246,7 @@ async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
     except Exception as e:
         logger.error(f"Error in pre_flight_check: {e}", exc_info=True)
         await bot.send_message(user_id, f"An unexpected error occurred while checking your setup: `{e}`")
+
 
 @Client.on_callback_query(filters.regex(r"^fwd_workers_"))
 async def cb_select_workers(bot, query):
