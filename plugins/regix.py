@@ -42,10 +42,10 @@ async def pub_(bot, cb):
     await m.edit("Starting clients...")
     main_client, worker_clients = None, []
     try:
-        main_client = await start_clone_bot(CLIENT.client(_bot), _bot)
+        main_client = await start_clone_bot(CLIENT().client(_bot), _bot)
         if num_workers > 0:
             for config in (await db.get_worker_bots(user_id))[:num_workers]:
-                worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
+                worker_clients.append(await start_clone_bot(CLIENT().client(config), config))
     except Exception as e:
         return await m.edit(f"Failed to start clients: {e}")
 
@@ -54,20 +54,20 @@ async def pub_(bot, cb):
         to_title = (await main_client.get_chat(i.TO)).title
     except Exception as e:
         await m.edit(f"Error accessing chats: {e}")
-        await stop_all([main_client] + worker_clients, user_id, frwd_id, m)
+        await stop_all([main_client] + worker_clients, user_id, frwd_id)
         return
 
     if num_workers > 0:
         manager_config = await db.get_manager_userbot(user_id)
         if not manager_config:
             await m.edit("❌ **Manager Userbot not set.** Please set one in /settings.")
-            await stop_all([main_client] + worker_clients, user_id, frwd_id, m)
+            await stop_all([main_client] + worker_clients, user_id, frwd_id)
             return
         
         manager_client = None
         try:
             await m.edit("Manager Userbot is setting up workers...")
-            manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
+            manager_client = await start_clone_bot(CLIENT().client(manager_config), manager_config)
             
             try: await manager_client.join_chat((await main_client.export_chat_invite_link(i.TO)))
             except UserAlreadyParticipant: pass
@@ -77,8 +77,8 @@ async def pub_(bot, cb):
                 except UserAlreadyParticipant: pass
                 await manager_client.promote_chat_member(i.TO, worker.me.id, privileges=ChatPrivileges(can_post_messages=True))
         except Exception as e:
-            await m.edit(f"Worker setup failed: {e}\n\nPlease ensure the Manager has admin rights in the target channel.")
-            await stop_all([main_client] + worker_clients + ([manager_client] if manager_client else []), user_id, frwd_id, m)
+            await m.edit(f"Worker setup failed: `{e}`\n\nPlease ensure the Fetcher Bot has 'Invite' permission and the Manager Userbot has 'Add New Admins' permission in the target channel.")
+            await stop_all([main_client] + worker_clients + ([manager_client] if manager_client else []), user_id, frwd_id)
             return
         finally:
             if manager_client: await manager_client.stop()
@@ -90,6 +90,7 @@ async def pub_(bot, cb):
     client_cycler = cycle(clients)
     
     try:
+        await m.edit(f"Forwarding from {from_title} to {to_title}...")
         message_ids = range(i.start_id, i.end_id + 1) if i.start_id < i.end_id else range(i.start_id, i.end_id - 1, -1)
         for chunk in [message_ids[x:x + 200] for x in range(0, len(message_ids), 200)]:
             if temp.CANCEL.get(frwd_id): break
@@ -104,7 +105,9 @@ async def pub_(bot, cb):
                     await asyncio.sleep(e.value)
                     await next(client_cycler).copy_message(i.TO, i.FROM, message.id)
                     sts.add('total_files')
-                except Exception: sts.add('failed')
+                except Exception as e:
+                    logger.warning(f"Failed to copy message {message.id}: {e}")
+                    sts.add('failed')
                 await asyncio.sleep(delay)
         final_status = "cancelled" if temp.CANCEL.get(frwd_id) else "completed"
     except Exception as e:
@@ -112,9 +115,9 @@ async def pub_(bot, cb):
         final_status = "error"
     finally:
         await m.edit(f"Forwarding {final_status}.")
-        await stop_all([main_client] + worker_clients, user_id, frwd_id, m)
+        await stop_all([main_client] + worker_clients, user_id, frwd_id)
 
-async def stop_all(clients, user_id, task_id, m):
+async def stop_all(clients, user_id, task_id):
     for client in clients:
         if client and client.is_connected:
             await client.stop()
