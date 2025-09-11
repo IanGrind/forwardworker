@@ -268,26 +268,34 @@ async def ask_for_workers(bot, session_id):
 
     buttons = []
     for i in range(1, len(worker_bots) + 1):
-        buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_workers_{session_id}_{i}"))
+        buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_workers:{session_id}:{i}"))
 
     # create a grid of buttons
-    buttons = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
-    buttons.append([InlineKeyboardButton("Skip", callback_data=f"select_workers_{session_id}_0")])
-    buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
+    button_grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    
+    # Add "Use All", "Skip", and "Cancel" buttons
+    button_grid.append([InlineKeyboardButton("✨ Use All", callback_data=f"select_workers:{session_id}:{len(worker_bots)}")])
+    button_grid.append([
+        InlineKeyboardButton("Skip", callback_data=f"select_workers:{session_id}:0"),
+        InlineKeyboardButton("« Cancel", callback_data="close_btn")
+    ])
 
     await bot.send_message(
         user_id,
         "How many worker bots do you want to use for this forward? Using more workers can significantly reduce floodwaits.",
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=InlineKeyboardMarkup(button_grid)
     )
 
-@Client.on_callback_query(filters.regex(r"^select_workers_"))
+@Client.on_callback_query(filters.regex(r"^select_workers:"))
 async def select_workers_callback(bot, query):
-    session_id, num_workers = query.data.split("_")[2:]
-    num_workers = int(num_workers)
-    
-    await query.message.delete()
-    await show_final_confirmation(bot, session_id, num_workers)
+    try:
+        _, session_id, num_workers_str = query.data.split(":", 2)
+        num_workers = int(num_workers_str)
+        
+        await query.message.delete()
+        await show_final_confirmation(bot, session_id, num_workers)
+    except ValueError:
+        await query.answer("Invalid selection.", show_alert=True)
 
 
 async def show_final_confirmation(bot, session_id, num_workers):
