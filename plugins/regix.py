@@ -6,7 +6,7 @@ from database import db
 from .test import CLIENT, start_clone_bot
 from config import Config, temp
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, UserAlreadyParticipant, PeerIdInvalid
+from pyrogram.errors import FloodWait, UserAlreadyParticipant, PeerIdInvalid, ChatAdminRequired
 from pyrogram.types import CallbackQuery, ChatPrivileges
 
 logger = logging.getLogger(__name__)
@@ -53,21 +53,31 @@ async def pub_(bot, cb: CallbackQuery):
             await m.edit(f"`Step 1/3: Starting Worker Bot {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
 
-        # --- THE CORE FIX IS HERE ---
-        # The illegal 'add_chat_members' step has been removed.
-        # We now proceed directly to promotion.
         await m.edit("`Step 2/3: Manager is promoting workers...`")
+        
+        # --- THIS IS THE CORE FIX ---
+        # We now grant a standard set of safe, non-destructive admin privileges
+        # to the worker bots. This satisfies the Telegram API's requirements.
+        worker_privileges = ChatPrivileges(
+            can_post_messages=True,
+            can_edit_messages=True,
+            can_delete_messages=True,
+            can_invite_users=True
+        )
+
         for i, worker in enumerate(worker_clients):
             await m.edit(f"`Step 2/3: Promoting worker {i+1}/{len(worker_clients)}...`")
             try:
-                # This single call now correctly adds and promotes the bot in one step.
                 await manager_client.promote_chat_member(
                     chat_id=target_chat_id,
                     user_id=worker.me.id,
-                    privileges=ChatPrivileges(can_post_messages=True)
+                    privileges=worker_privileges
                 )
+            except ChatAdminRequired as e:
+                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\n**Troubleshooting:**\n1. Ensure the Manager Userbot is an admin in the target channel.\n2. Ensure the Manager Userbot has the 'Add New Admins' permission.\n3. Check if the channel owner has 'Remain Anonymous' enabled, as this can sometimes cause permission issues.")
             except Exception as e:
-                 return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote worker `{worker.me.first_name}`.\nError: `{e}`\n\nPlease ensure the Manager has 'Add New Admins' permission.")
+                 return await m.edit(f"**Setup Error:**\nAn unexpected error occurred while promoting worker `{worker.me.first_name}`.\nError: `{e}`")
+
 
         await m.edit("`Step 3/3: Starting Fetcher Client...`")
         fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
