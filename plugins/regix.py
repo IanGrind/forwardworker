@@ -106,8 +106,13 @@ async def pub_(bot, cb):
         
         except PeerIdInvalid:
             await msg_edit(m,
-                "❌ **Configuration Error:** The **Main Worker Bot** could not find the target channel.\n\n"
-                "**Solution:** Please ensure the **Main Worker Bot** has been **manually added** as a member to the target channel."
+                f"❌ **Configuration Error:** The **Main Worker Bot** could not find the target channel: **{to_title}** (`{i.TO}`).\n\n"
+                "This error means the bot is not a member of that channel.\n\n"
+                "**Troubleshooting Steps:**\n"
+                "1. **Check the Bot:** Go to `/settings` -> `Worker Bots` and confirm which bot is your 👑 **Main Worker**.\n"
+                "2. **Check Membership:** Go to the admin list of your target channel (`{to_title}`) and confirm that exact bot is listed.\n"
+                "3. **Re-add the Bot:** Try removing the Main Worker Bot from the channel and adding it back as an admin.\n"
+                "4. **Check Permissions:** Ensure the Main Worker Bot has the **'Add New Admins'** permission in the target channel."
             )
             all_clients_to_stop = [main_client] + worker_clients + ([main_worker_client] if main_worker_client else [])
             await stop_all(all_clients_to_stop, user_id, frwd_id, m)
