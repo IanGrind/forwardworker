@@ -31,6 +31,7 @@ class Database:
         self.nfy = self.db.notify
         self.chl = self.db.channels
         self.worker = self.db.workers
+        self.main_worker = self.db.main_worker
 
     def new_user(self, id, name):
         return dict(
@@ -217,6 +218,8 @@ class Database:
 
     async def remove_worker_bot(self, user_id, bot_id):
         await self.worker.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
+        # Also remove it if it was the main worker
+        await self.main_worker.delete_one({'user_id': int(user_id), 'id': int(bot_id)})
 
     async def get_worker_bots(self, user_id: int):
         workers = self.worker.find({'user_id': user_id})
@@ -225,3 +228,17 @@ class Database:
     async def is_worker_bot_exist(self, user_id, bot_id):
         worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
         return bool(worker)
+
+    async def set_main_worker(self, user_id, bot_id):
+        # Remove any existing main worker for this user
+        await self.main_worker.delete_many({'user_id': user_id})
+        worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
+        if worker:
+            await self.main_worker.insert_one(worker)
+
+    async def get_main_worker(self, user_id):
+        return await self.main_worker.find_one({'user_id': user_id})
+
+    async def get_worker_bot(self, user_id: int, bot_id: int):
+        worker = await self.worker.find_one({'user_id': user_id, 'id': bot_id})
+        return worker if worker else None
