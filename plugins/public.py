@@ -152,7 +152,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             await message.reply("That was not a valid forwarded message. Please try again.")
             await show_settings_menu(bot, message, 'channels')
 
-
 @Client.on_callback_query(filters.regex(r"^(range_|noop)"))
 async def range_menu_handler(bot: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -224,18 +223,16 @@ async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
         if manager and workers:
             report += "\n\n✅ **System Ready.** Please select the number of workers to use for this task."
             
-            # This logic creates a flat list of buttons first.
             buttons = [
                 InlineKeyboardButton(
                     str(i),
-                    callback_data=f"fwd_workers_{session_id}_{i}"
+                    callback_data=f"fwd_workers:{session_id}:{i}"
                 ) for i in range(1, len(workers) + 1)
             ]
             
-            # This correctly chunks the flat list into rows, with a maximum of 5 buttons per row.
             grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
             
-            grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
+            grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers:{session_id}:{len(workers)}")])
             grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
             
             await bot.send_message(user_id, report, reply_markup=InlineKeyboardMarkup(grid))
@@ -247,12 +244,20 @@ async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
         logger.error(f"Error in pre_flight_check: {e}", exc_info=True)
         await bot.send_message(user_id, f"An unexpected error occurred while checking your setup: `{e}`")
 
-
-@Client.on_callback_query(filters.regex(r"^fwd_workers_"))
+@Client.on_callback_query(filters.regex(r"^fwd_workers:"))
 async def cb_select_workers(bot, query):
-    _, session_id, num_workers = query.data.split("_")
-    await query.message.delete()
-    await show_final_confirmation(bot, query, session_id, int(num_workers))
+    try:
+        _, session_id, num_workers_str = query.data.split(":")
+        num_workers = int(num_workers_str)
+        await query.message.delete()
+        await show_final_confirmation(bot, query, session_id, num_workers)
+    except ValueError:
+        logger.error(f"Could not unpack callback data: {query.data}")
+        await query.answer("An internal error occurred (ValueError).", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error in cb_select_workers: {e}", exc_info=True)
+        await query.answer("An unexpected error occurred.", show_alert=True)
+
 
 async def show_final_confirmation(bot, query, session_id, num_workers):
     user_id = query.from_user.id
