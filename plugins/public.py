@@ -9,6 +9,7 @@ from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT
+from .settings import show_settings_menu
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from pyrogram.errors import PeerIdInvalid
@@ -31,7 +32,7 @@ def parse_message_input(message):
 @Client.on_message(filters.private & filters.command(["fwd", "forward"]))
 async def run(bot, message):
     user_id = message.from_user.id
-    if temp.lock.get(user_id): return await message.reply("A task is already in progress.")
+    if temp.lock.get(user_id): return await message.reply("A task is in progress.")
     temp.USER_STATES.pop(user_id, None)
     
     bots = await db.get_bots(user_id)
@@ -127,21 +128,30 @@ async def stateful_message_handler(bot: Client, message: Message):
         await update_range_message(bot, session_id)
         
     elif state_type == "awaiting_bot_token":
-        await CLIENT().add_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
+        if await CLIENT().add_bot(message):
+            await show_settings_menu(bot, message, 'bots')
+            
     elif state_type == "awaiting_user_session":
-        await CLIENT().add_session(bot, message)
         temp.USER_STATES.pop(user_id, None)
+        if await CLIENT().add_session(message):
+            await show_settings_menu(bot, message, 'bots')
+
     elif state_type == "awaiting_worker_bot_token":
-        await CLIENT().add_worker_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
+        if await CLIENT().add_worker_bot(message):
+            await show_settings_menu(bot, message, 'workers')
+
     elif state_type == "awaiting_channel_forward":
+        temp.USER_STATES.pop(user_id, None)
         if message.forward_from_chat:
             await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
             await message.reply("✅ Channel added.")
+            await show_settings_menu(bot, message, 'channels')
         else:
-            await message.reply("Please forward a message from the channel.")
-        temp.USER_STATES.pop(user_id, None)
+            await message.reply("That was not a valid forwarded message. Please try again.")
+            await show_settings_menu(bot, message, 'channels')
+
 
 @Client.on_callback_query(filters.regex(r"^range_confirm_"))
 async def range_confirm_handler(bot, query):
