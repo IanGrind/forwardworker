@@ -152,7 +152,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             await message.reply("That was not a valid forwarded message. Please try again.")
             await show_settings_menu(bot, message, 'channels')
 
-
 @Client.on_callback_query(filters.regex(r"^(range_|noop)"))
 async def range_menu_handler(bot: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -171,7 +170,7 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
 
         if action == "confirm":
             await query.message.delete()
-            await pre_flight_check(bot, query, session_id)
+            await pre_flight_check_and_ask_for_workers(bot, query, session_id)
 
         elif action == "cancel":
             temp.RANGE_SESSIONS.pop(session_id, None)
@@ -201,7 +200,7 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
         logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
         await query.answer("An error occurred.", show_alert=True)
 
-async def pre_flight_check(bot, query, session_id):
+async def pre_flight_check_and_ask_for_workers(bot, query, session_id):
     user_id = query.from_user.id
     try:
         session = temp.RANGE_SESSIONS.get(session_id)
@@ -211,22 +210,23 @@ async def pre_flight_check(bot, query, session_id):
         workers = await db.get_worker_bots(user_id)
         manager = await db.get_manager_userbot(user_id)
         
-        # Build a diagnostic report
         manager_status = f"✅ `{manager['name']}`" if manager else "⚠️ **Not Set**"
         worker_status = f"✅ `{len(workers)}` Found" if workers else "⚠️ **None Found**"
         
         report = (
             "**Step 3: Pre-Flight Check**\n\n"
-            "The bot has checked your setup for the required components.\n\n"
+            "This is your current forwarding setup:\n\n"
             f"● **Manager Userbot:** {manager_status}\n"
             f"● **Worker Bots:** {worker_status}"
         )
         
-        is_ready = manager and workers
-        if is_ready:
+        if manager and workers:
             report += "\n\n✅ **System Ready.** Please select the number of workers to use for this task."
-            await bot.send_message(user_id, report)
-            await ask_for_workers(bot, query, session_id, workers)
+            buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
+            grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+            grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
+            grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
+            await bot.send_message(user_id, report, reply_markup=InlineKeyboardMarkup(grid))
         else:
             report += "\n\n❌ **Setup Incomplete.** Please configure the missing items in /settings before proceeding."
             await bot.send_message(user_id, report)
@@ -234,13 +234,6 @@ async def pre_flight_check(bot, query, session_id):
     except Exception as e:
         logger.error(f"Error in pre_flight_check: {e}", exc_info=True)
         await bot.send_message(user_id, f"An unexpected error occurred while checking your setup: `{e}`")
-
-async def ask_for_workers(bot, query, session_id, workers):
-    buttons = [[InlineKeyboardButton(str(i), callback_data=f"fwd_workers_{session_id}_{i}")] for i in range(1, len(workers) + 1)]
-    grid = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
-    grid.append([InlineKeyboardButton("✨ Use All Workers", callback_data=f"fwd_workers_{session_id}_{len(workers)}")])
-    grid.append([InlineKeyboardButton("❌ Cancel", callback_data="close_btn")])
-    await bot.send_message(query.from_user.id, "How many worker bots do you want to use for this task?", reply_markup=InlineKeyboardMarkup(grid))
 
 @Client.on_callback_query(filters.regex(r"^fwd_workers_"))
 async def cb_select_workers(bot, query):
