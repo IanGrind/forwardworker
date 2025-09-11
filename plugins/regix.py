@@ -24,9 +24,10 @@ async def pub_(bot, cb):
         return await cb.answer("Task in progress.", show_alert=True)
 
     frwd_id = cb.data.split("_")[2]
-    session = temp.RANGE_SESSIONS.pop(frwd_id, None)
+    # Corrected the dictionary from which the session is popped
+    session = temp.FORWARD_SESSIONS.pop(frwd_id, None)
     if not session:
-        return await cb.message.edit("This task has expired.")
+        return await cb.message.edit("This task has expired or is invalid.")
 
     num_workers = session.get('num_workers', 0)
     temp.CANCEL[frwd_id] = False
