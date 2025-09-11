@@ -9,7 +9,6 @@ from .test import CLIENT, update_configs
 from .parser import parse_buttons
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-CLIENT = CLIENT()
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
