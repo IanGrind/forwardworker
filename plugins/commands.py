@@ -2,7 +2,7 @@ import os
 import sys
 import asyncio 
 import random
-from database import db, mongodb_version
+from database import db
 from config import Config, temp
 from platform import python_version
 from translation import Translation
