@@ -34,13 +34,13 @@ async def run(bot, message):
     if temp.lock.get(user_id): return await message.reply("A task is in progress.")
     
     bots = await db.get_bots(user_id)
-    if not bots: return await message.reply("You haven't added any bots or userbots. Please add at least one in `/settings`.")
+    if not bots: return await message.reply("You haven't added any bots or userbots. These will act as your **Operators**. Please add at least one in `/settings`.")
 
     channels = await db.get_user_channels(user_id)
     if not channels: return await message.reply("You haven't added any target channels. Please add one in `/settings`.")
 
-    # Store the initial command message to access it later
-    temp.USER_STATES[user_id] = {'command_message': message}
+    # Store a reference to the initial command message
+    temp.USER_STATES[user_id] = {'command_message': message, 'is_settings': False}
     
     buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in channels]
     buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
@@ -50,20 +50,20 @@ async def run(bot, message):
 async def cb_select_target(bot, query):
     user_id = query.from_user.id
     state = temp.USER_STATES.get(user_id)
-    if not state: return await query.answer("Your session has expired. Please start over.", show_alert=True)
+    if not state or state.get("is_settings"): return await query.answer("This is not for you, or your session has expired.", show_alert=True)
     
     state['to_chat_id'] = int(query.data.split('_')[-1])
     
     prompt = await query.message.edit_text(Translation.FROM_MSG)
     state['prompt_message_id'] = prompt.id
-    state['state'] = 'awaiting_source' # Set state for the next step
+    state['state'] = 'awaiting_source'
 
-# This is now the primary handler for user replies.
 @Client.on_message(filters.private & filters.incoming & ~filters.command(["fwd", "forward"]))
-async def message_handler(bot: Client, message: Message):
+async def fwd_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
     
+    # This handler only cares about the forwarding conversation
     if not state or state.get('state') != 'awaiting_source':
         return
 
@@ -79,7 +79,6 @@ async def message_handler(bot: Client, message: Message):
     to_chat_id = state.get('to_chat_id')
     command_message = state.get('command_message')
     
-    # We are done with the conversation, clear the state.
     temp.USER_STATES.pop(user_id, None)
 
     bots = await db.get_bots(user_id)
@@ -91,7 +90,6 @@ async def message_handler(bot: Client, message: Message):
         logger.warning(f"Could not get chat title with first bot. Non-critical. Error: {e}")
     
     await start_range_selection(bot, command_message, from_chat, from_title, to_chat_id, 1, end_id)
-
 
 @Client.on_callback_query(filters.regex(r"^(range_|noop)"))
 async def range_menu_handler(bot: Client, query: CallbackQuery):
@@ -126,7 +124,8 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
                 "state": "awaiting_range_edit",
                 "session_id": session_id,
                 "part_to_edit": part_to_edit,
-                "prompt_message_id": prompt_msg.id
+                "prompt_message_id": prompt_msg.id,
+                "is_settings": False
             }
 
         elif action == "swap":
@@ -139,6 +138,7 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
     except Exception as e:
         logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
         await query.answer("An error occurred.", show_alert=True)
+
 
 async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
@@ -166,4 +166,6 @@ async def show_final_confirmation(bot, query, session_id):
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
+    # Also clear any lingering state when the user cancels
+    temp.USER_STATES.pop(query.from_user.id, None)
     await query.message.delete()
