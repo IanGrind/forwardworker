@@ -39,19 +39,12 @@ async def pub_(bot, cb: CallbackQuery):
         if not fetcher_config or not manager_config or not worker_configs:
             return await m.edit("Error: A required bot/userbot configuration was not found.")
 
-        # --- THIS IS THE CORE FIX ---
-        # All clients now perform a "wake-up" routine to populate their internal chat cache.
         await m.edit("`Step 1/4: Waking up clients...`")
         manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
-        async for _ in manager_client.get_dialogs(limit=1): pass # Wake-up call
-
         fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
-        async for _ in fetcher_client.get_dialogs(limit=1): pass # Wake-up call
-
         for i, config in enumerate(worker_configs):
             await m.edit(f"`Step 1/4: Waking up worker {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
-        # --- END OF WAKE-UP ROUTINE ---
         
         target_chat_id = session['to_chat_id']
         source_chat_id = session['from_chat_id']
