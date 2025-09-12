@@ -39,26 +39,32 @@ async def pub_(bot, cb: CallbackQuery):
         if not fetcher_config or not manager_config or not worker_configs:
             return await m.edit("Error: A required bot/userbot configuration was not found.")
 
-        await m.edit("`Step 1/4: Starting all clients...`")
+        # --- THIS IS THE CORE FIX ---
+        # All clients now perform a "wake-up" routine to populate their internal chat cache.
+        await m.edit("`Step 1/4: Waking up clients...`")
         manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
+        async for _ in manager_client.get_dialogs(limit=1): pass # Wake-up call
+
         fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
-        for config in worker_configs:
+        async for _ in fetcher_client.get_dialogs(limit=1): pass # Wake-up call
+
+        for i, config in enumerate(worker_configs):
+            await m.edit(f"`Step 1/4: Waking up worker {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
+        # --- END OF WAKE-UP ROUTINE ---
         
         target_chat_id = session['to_chat_id']
         source_chat_id = session['from_chat_id']
 
-        # --- THIS IS THE CORE FIX ---
-        await m.edit("`Step 2/4: Verifying Fetcher access to source channel...`")
+        await m.edit("`Step 2/4: Verifying channel access...`")
         try:
             await fetcher_client.get_chat(source_chat_id)
         except PeerIdInvalid:
              return await m.edit(f"**Setup Error:**\nThe Fetcher Bot/Userbot (`{fetcher_config['name']}`) is not a member of the source channel. Please add it and try again.")
         except Exception as e:
             return await m.edit(f"**Setup Error:**\nCould not access source channel with Fetcher. Error: `{e}`")
-        # --- END OF FETCHER CHECK ---
 
-        await m.edit("`Step 3/4: Manager is promoting workers...`")
+        await m.edit("`Step 3/4: Promoting workers...`")
         worker_privileges = ChatPrivileges(can_post_messages=True, can_edit_messages=True, can_delete_messages=True)
 
         for i, worker in enumerate(worker_clients):
@@ -87,7 +93,7 @@ async def pub_(bot, cb: CallbackQuery):
         
         client_cycler = cycle(worker_clients)
         
-        await m.edit(f"✅ **Setup Complete!**\n\nForwarding from **{session['from_title']}**...")
+        await m.edit(f"✅ **Step 4/4: Setup Complete!**\n\nForwarding from **{session['from_title']}**...")
         start_time = time.time()
         last_edit_time = start_time
         
@@ -112,9 +118,8 @@ async def pub_(bot, cb: CallbackQuery):
                     logger.warning(f"Failed to copy message {message.id}: {e}")
                     sts.add('failed')
                 
-                # --- PROGRESS UPDATE LOGIC ---
                 current_time = time.time()
-                if current_time - last_edit_time > 5: # Update every 5 seconds
+                if current_time - last_edit_time > 5:
                     await edit_progress(m, sts, start_time)
                     last_edit_time = current_time
         
