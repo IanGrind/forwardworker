@@ -2,7 +2,7 @@
 
 from database import initialize_database
 
-# Initialize the database BEFORE importing the Bot class.
+# Initialize the database BEFORE importing anything else. This is critical.
 initialize_database()
 
 from bot import Bot
