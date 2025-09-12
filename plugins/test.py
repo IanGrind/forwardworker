@@ -1,3 +1,5 @@
+# iangrind/forwardworker/forwardworker-1ff680b8c32922eb74e103a193e108a8d299c7bc/plugins/test.py
+
 import os
 import re 
 import sys
@@ -18,13 +20,10 @@ async def start_clone_bot(client_instance, bot_data):
     """Starts the client and performs a type-specific wake-up routine."""
     await client_instance.start()
     
-    # Userbots use get_dialogs, regular bots use get_me()
     if not bot_data.get('is_bot', True):
-        # This is a userbot, so we wake it up by fetching dialogs.
         async for _ in client_instance.get_dialogs(limit=1):
             pass
     else:
-        # This is a regular bot, so we use the safe get_me() method.
         await client_instance.get_me()
         
     return client_instance
@@ -63,29 +62,6 @@ class CLIENT:
         await msg.reply_text(f"<b>⚠️ Bot Error:</b>\n`{e}`\n\nPlease check the token and try again.")
         return False
 
-  async def add_worker_bot(self, msg: Message):
-    user_id = msg.from_user.id
-    token_match = re.search(r'(\d{8,10}:[a-zA-Z0-9_-]{35})', msg.text)
-    if not token_match:
-        await msg.reply_text("That doesn't look like a valid worker bot token.")
-        return False
-    token = token_match.group(1)
-
-    try:
-        async with self.client({'token': token, 'is_bot': True}) as _client:
-            _bot = await _client.get_me()
-        
-        if await db.is_worker_bot_exist(user_id, _bot.id):
-            await msg.reply_text("This worker bot has already been added.")
-            return False
-
-        await db.add_worker_bot({'id': _bot.id, 'is_bot': True, 'user_id': user_id, 'name': _bot.first_name, 'token': token, 'username': _bot.username})
-        await msg.reply_text(f"✅ Worker Bot '{_bot.first_name}' added successfully.")
-        return True
-    except Exception as e:
-        await msg.reply_text(f"<b>⚠️ Worker Bot Error:</b>\n`{e}`\n\nPlease check the token and try again.")
-        return False
-    
   async def add_session(self, msg: Message):
     user_id = msg.from_user.id
     session_string = msg.text.strip()
@@ -114,5 +90,81 @@ class CLIENT:
         await msg.reply_text(f"<b>⚠️ An unexpected error occurred:</b>\n`{e}`")
         logger.error(f"Error adding session string: {e}", exc_info=True)
         return False
+
+  async def _add_single_bot_from_bulk(self, token, user_id):
+    """Helper for add_bots_bulk to process one token."""
+    try:
+        async with self.client({'token': token, 'is_bot': True}) as _client:
+            _bot = await _client.get_me()
+        if await db.is_bot_exist(user_id, _bot.id):
+            return "duplicate"
+        await db.add_bot({'id': _bot.id, 'is_bot': True, 'user_id': user_id, 'name': _bot.first_name, 'token': token, 'username': _bot.username})
+        return "success"
+    except Exception:
+        return "failed"
+
+  async def add_bots_bulk(self, msg: Message):
+    user_id = msg.from_user.id
+    processing_msg = await msg.reply_text("`Processing tokens... This may take a moment.`")
+    
+    tokens = re.findall(r'(\d{8,10}:[a-zA-Z0-9_-]{35})', msg.text)
+    if not tokens:
+        await processing_msg.edit("No valid bot tokens found in your message.")
+        return False
+
+    tasks = [self._add_single_bot_from_bulk(token, user_id) for token in tokens]
+    results = await asyncio.gather(*tasks)
+    
+    success = results.count("success")
+    duplicate = results.count("duplicate")
+    failed = results.count("failed")
+    
+    await processing_msg.edit(
+        f"<b>Bulk Add Complete</b>\n\n"
+        f"● **Total Processed:** `{len(tokens)}`\n"
+        f"● **Successfully Added:** `{success}`\n"
+        f"● **Duplicates Skipped:** `{duplicate}`\n"
+        f"● **Failed:** `{failed}`"
+    )
+    return True
+
+  async def _add_single_session_from_bulk(self, session_string, user_id):
+    """Helper for add_sessions_bulk to process one session string."""
+    if len(session_string) < SESSION_STRING_SIZE:
+        return "failed"
+    try:
+        async with self.client({'session': session_string, 'is_bot': False}) as client:
+            user = await client.get_me()
+        if await db.is_bot_exist(user_id, user.id):
+            return "duplicate"
+        await db.add_bot({'id': user.id, 'is_bot': False, 'user_id': user_id, 'name': user.first_name, 'session': session_string, 'username': user.username})
+        return "success"
+    except Exception:
+        return "failed"
+
+  async def add_sessions_bulk(self, msg: Message):
+    user_id = msg.from_user.id
+    processing_msg = await msg.reply_text("`Processing session strings... This may take a moment.`")
+
+    sessions = msg.text.strip().split()
+    if not sessions:
+        await processing_msg.edit("No session strings found in your message.")
+        return False
+
+    tasks = [self._add_single_session_from_bulk(session, user_id) for session in sessions]
+    results = await asyncio.gather(*tasks)
+
+    success = results.count("success")
+    duplicate = results.count("duplicate")
+    failed = results.count("failed")
+
+    await processing_msg.edit(
+        f"<b>Bulk Add Complete</b>\n\n"
+        f"● **Total Processed:** `{len(sessions)}`\n"
+        f"● **Successfully Added:** `{success}`\n"
+        f"● **Duplicates Skipped:** `{duplicate}`\n"
+        f"● **Failed:** `{failed}`"
+    )
+    return True
 
 CLIENT = CLIENT()
