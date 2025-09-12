@@ -116,8 +116,3 @@ class CLIENT:
         return False
 
 CLIENT = CLIENT()
-
-async def update_configs(user_id, key, value):
-    configs = await db.get_configs(user_id)
-    configs[key] = value
-    await db.update_configs(user_id, configs)
