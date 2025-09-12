@@ -26,6 +26,18 @@ class Database:
         user = await self.col.find_one({'id': int(id)})
         return user.get('ban_status', {'is_banned': False, 'ban_reason': ''}) if user else {'is_banned': False, 'ban_reason': ''}
         
+    async def ban_user(self, user_id, ban_reason="No Reason"):
+        ban_status = dict(is_banned=True, ban_reason=ban_reason)
+        await self.col.update_one({'id': user_id}, {'$set': {'ban_status': ban_status}})
+
+    async def remove_ban(self, id):
+        ban_status = dict(is_banned=False, ban_reason='')
+        await self.col.update_one({'id': id}, {'$set': {'ban_status': ban_status}})
+
+    async def get_banned(self):
+        users = self.col.find({'ban_status.is_banned': True})
+        return [user['id'] async for user in users]
+
     async def get_configs(self, id):
         default = {
             'caption': None, 'duplicate': True, 'forward_tag': False, 'file_size': 0, 'size_limit': None,
