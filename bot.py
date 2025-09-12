@@ -4,7 +4,7 @@ import logging.config
 from config import Config, temp
 from database import db
 from aiohttp import web
-from plugins import web_server
+from plugins.route import routes  # Import routes from the plugin
 from pyrogram import Client, __version__, idle
 from pyrogram.raw.all import layer 
 from pyrogram.enums import ParseMode
@@ -16,10 +16,16 @@ logging.getLogger("pyrogram").setLevel(logging.ERROR)
 
 PORT = Config.PORT
 
+async def web_server():
+    """Initializes the web server application."""
+    web_app = web.Application(client_max_size=30000000)
+    web_app.add_routes(routes)
+    return web_app
+
 class Bot(Client): 
     def __init__(self):
         super().__init__(
-            Config.BOT_SESSION,
+            name=Config.BOT_SESSION,
             api_hash=Config.API_HASH,
             api_id=Config.API_ID,
             plugins={
@@ -38,24 +44,19 @@ class Bot(Client):
             await super().start()
             
         me = await self.get_me()
-        logging.info(f"{me.first_name} with for pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
-        self.id = me.id
-        self.username = me.username
-        self.first_name = me.first_name
-        self.set_parse_mode(ParseMode.DEFAULT)
+        self.log.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
         
-        # This line will now work correctly.
         temp.BANNED_USERS = await db.get_banned()
 
-        # Start the web server
+        # Start the web server here
         app = web.AppRunner(await web_server())
         await app.setup()
         bind_address = "0.0.0.0"
         await web.TCPSite(app, bind_address, PORT).start()
+        self.log.info(f"Web server started on port {PORT}.")
         
         await idle()
-        logging.info("Bot has stopped.")
 
     async def stop(self, *args):
         await super().stop()
-        logging.info(f"@{self.username} stopped. Bye.")
+        self.log.info("Bot has stopped.")
