@@ -41,7 +41,8 @@ class WorkerManager:
 
     async def start(self):
         logger.info(f"WorkerManager started with {len(self.clients)} workers for batch forwarding.")
-        while not self.job_queue.empty() and not self.is_cancelled:
+        # CORRECTED: Use truthiness to check if deque is empty. ".empty()" was the bug.
+        while self.job_queue and not self.is_cancelled:
             if not self.clients:
                 if self.cooldown_workers:
                     first_worker_cooldown_end = min(self.cooldown_workers.values())
@@ -59,7 +60,7 @@ class WorkerManager:
             try:
                 await self.process_batch(active_client)
                 self.clients.append(active_client)
-                if self.delay_between_batches > 0 and not self.job_queue.empty():
+                if self.delay_between_batches > 0 and self.job_queue:
                     await asyncio.sleep(self.delay_between_batches)
             except FloodWait as e:
                 cooldown_duration = e.value + 5
@@ -117,7 +118,7 @@ async def pub_(bot, cb: CallbackQuery):
     m = await cb.message.edit("`Initializing...`")
     
     operator_clients = []
-    task_failed_prematurely = False
+    sts = None
     
     try:
         operator_configs = await db.get_bots(user_id)
@@ -147,7 +148,7 @@ async def pub_(bot, cb: CallbackQuery):
             await operator_clients[0].get_chat(session['from_chat_id'])
             await operator_clients[0].get_chat(session['to_chat_id'])
         except Exception as e:
-            raise ValueError(f"Operator {operator_clients[0].me.first_name} could not access a required chat. Please ensure it is in both channels.\n\nError: {e}")
+            raise ValueError(f"Operator {operator_clients[0].me.first_name} could not access a required chat.\n\nError: {e}")
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
         
@@ -178,21 +179,22 @@ async def pub_(bot, cb: CallbackQuery):
         cancel_task = asyncio.create_task(cancel_checker())
         await manager.start()
 
-    except Exception as e:
-        task_failed_prematurely = True
-        logger.error(f"A critical error occurred before finishing: {e}", exc_info=True)
-        await m.edit(f"**TASK FAILED**\n\n**Error:** `{e}`")
-    finally:
-        if 'cancel_task' in locals() and not cancel_task.done(): cancel_task.cancel()
-        
-        if not task_failed_prematurely:
-            if 'reporter_task' in locals() and not reporter_task.done(): 
-                reporter_task.cancel()
-            await asyncio.sleep(0.1) 
-            if 'sts' in locals():
-                await edit_progress(m, sts, sts.get('start'), done=True)
+        # CORRECTED: This part now only runs if the loop completes without errors.
+        if not cancel_task.done():
+            cancel_task.cancel()
+        if not reporter_task.done():
+            reporter_task.cancel()
+        await asyncio.sleep(0.1) 
+        await edit_progress(m, sts, sts.get('start'), done=True)
 
-        logger.info("Stopping all operator clients...")
+
+    except Exception as e:
+        # CORRECTED: The error message will now persist.
+        logger.error(f"A critical error occurred, halting task: {e}", exc_info=True)
+        await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
+    finally:
+        # CORRECTED: The finally block is now ONLY for cleanup.
+        logger.info("Cleaning up forwarding task resources...")
         stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         
