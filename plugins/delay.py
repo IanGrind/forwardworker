@@ -5,7 +5,12 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from database import db
 from translation import Translation
-from .utils import update_configs
+
+async def update_configs(user_id, key, value):
+    """Helper function to update a specific config key."""
+    configs = await db.get_configs(user_id)
+    configs[key] = value
+    await db.update_configs(user_id, configs)
 
 @Client.on_message(filters.private & filters.command(["forwardelay", "fd"]))
 async def forward_delay(client: Client, message: Message):
