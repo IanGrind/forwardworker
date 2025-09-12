@@ -107,24 +107,47 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
         if action == "confirm":
             await query.message.delete()
             await show_final_confirmation(bot, query, session_id)
+
+        elif action == "all":
+            await query.answer("Checking for the last message...", show_alert=False)
+            bots = await db.get_bots(user_id)
+            if not bots:
+                return await query.answer("No operator bots found to perform this action.", show_alert=True)
+            
+            try:
+                async with CLIENT.client(bots[0]) as temp_client:
+                    async for last_message in temp_client.get_chat_history(session['from_chat_id'], limit=1):
+                        session['start_id'] = 1
+                        session['end_id'] = last_message.id
+                        await update_range_message(bot, session_id, message_to_edit=query.message)
+                        return await query.answer(f"Range set to: 1 -> {last_message.id}", show_alert=False)
+                await query.answer("Could not find any messages in the source chat.", show_alert=True)
+            except Exception as e:
+                logger.error(f"Could not get last message for 'Forward All': {e}")
+                await query.answer(f"Error: Could not access the source chat. Is the operator bot a member?\n\n({e})", show_alert=True)
+
         elif action == "cancel":
             temp.RANGE_SESSIONS.pop(session_id, None)
             await query.message.delete()
             await bot.send_message(user_id, "Operation cancelled.")
+
         elif action == "edit":
-            part_to_edit = parts[2]
+            part_to_edit = "start" if parts[2] == "start" else "end"
             prompt_text = f"OK, send the new **{part_to_edit}** message ID."
             prompt_msg = await query.message.edit_text(prompt_text)
             temp.USER_STATES[user_id] = { "state": "awaiting_range_edit", "session_id": session_id, "part_to_edit": part_to_edit, "prompt_message_id": prompt_msg.id, "is_settings": False }
+        
         elif action == "swap":
             start, end = session['start_id'], session['end_id']
             session['start_id'] = end
             session['end_id'] = start
             await update_range_message(bot, session_id, message_to_edit=query.message)
             await query.answer("Order swapped")
+            
     except Exception as e:
         logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
         await query.answer("An error occurred.", show_alert=True)
+
 
 async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
@@ -206,13 +229,22 @@ async def forward_delay(client: Client, message: Message):
     user_configs = await db.get_configs(user_id)
     current_delay = user_configs.get('forward_delay', 0)
 
-    if len(message.command) < 2: return await message.reply_text(Translation.FORWARDELAY_TXT.format(current_delay=current_delay))
+    if len(message.command) < 2: 
+        await message.reply_text(
+            f"<b>֎ Batch Delay ֎</b>\n\n"
+            f"Set a custom delay between batches of 100 messages. Helps avoid API limits on very large forwards.\n\n"
+            f"<b>Current Delay:</b> <code>{current_delay} seconds</code>\n\n"
+            f"<b>Usage:</b> `/forwardelay [seconds]`\n"
+            f"<b>Example:</b> `/forwardelay 0.5`\n\n"
+            f"Set to `0` for maximum speed."
+        )
+        return
     
     try:
         delay = float(message.command[1])
         if delay < 0: return await message.reply_text("The delay must be a positive number.")
         await update_configs(user_id, 'forward_delay', delay)
-        await message.reply_text(f"✅ Forwarding delay has been updated to **{delay} seconds**.")
+        await message.reply_text(f"✅ Delay between batches has been updated to **{delay} seconds**.")
     except ValueError: await message.reply_text("Invalid input. Please provide a number (e.g., `0.5`, `1`, `2`).")
     except Exception as e: await message.reply_text(f"An error occurred: {e}")
 
@@ -272,6 +304,31 @@ async def universal_message_handler(bot: Client, message: Message):
             logger.warning(f"Could not get chat title with first bot. Non-critical. Error: {e}")
         
         await start_range_selection(bot, command_message, from_chat, from_title, to_chat_id, 1, end_id)
+        
+    # Reply to range edit prompts
+    elif state.get('state') == 'awaiting_range_edit':
+        session_id = state.get("session_id")
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session: 
+            temp.USER_STATES.pop(user_id, None)
+            return await message.reply_text("Your session has expired. Please start over.")
+        
+        try:
+            new_id = int(message.text)
+            part_to_edit = state.get("part_to_edit")
+            session[f'{part_to_edit}_id'] = new_id
+            
+            await message.delete()
+            if state.get("prompt_message_id"):
+                await bot.delete_messages(user_id, state["prompt_message_id"])
+
+            temp.USER_STATES.pop(user_id, None)
+            await update_range_message(bot, session_id)
+        except ValueError:
+            await message.reply_text("That's not a valid message ID. Please send a number.")
+        except Exception as e:
+            logger.error(f"Error processing range edit: {e}", exc_info=True)
+
 
 # --- Helper functions for Settings & other commands ---
 
