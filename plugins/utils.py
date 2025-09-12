@@ -15,6 +15,12 @@ STATUS = {}
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
+async def update_configs(user_id, key, value):
+    """Helper function to update a specific config key."""
+    configs = await db.get_configs(user_id)
+    configs[key] = value
+    await db.update_configs(user_id, configs)
+
 def get_readable_time(seconds: int) -> str:
     if seconds == 0: return "0s"
     result = ""
