@@ -1,13 +1,14 @@
 import re
 import random
-import time as tm
+import time
+import math
 import logging
 from uuid import uuid4
 from database import db
 from config import temp
 from translation import Translation
-from .parser import parse_buttons
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram.errors import MessageNotModified
 
 STATUS = {}
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
@@ -38,7 +39,7 @@ class STS:
             "id": self.id, "FROM": From, 'TO': to, 'total_files': 0,
             'start_id': start_id, 'end_id': end_id, 'fetched': 0, 
             'failed': 0, 'total': abs(end_id - start_id) + 1, 
-            'start': tm.time(), 'status': 'running'
+            'start': time.time(), 'status': 'running'
         }
         return self.get(full=True)
 
@@ -94,3 +95,44 @@ async def update_range_message(bot, session_id, message_to_edit=None):
             )
     except Exception as e:
         logger.error(f"Error in update_range_message: {e}", exc_info=True)
+
+async def edit_progress(message, sts, start_time):
+    """Refreshes the progress message."""
+    try:
+        text = progress_text(sts, start_time)
+        await message.edit_text(text)
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.warning(f"Failed to edit progress message: {e}")
+
+def progress_text(sts, start_time):
+    """Formats the progress text."""
+    total = sts.get('total')
+    fetched = sts.get('fetched')
+    forwarded = sts.get('total_files')
+    failed = sts.get('failed')
+    
+    elapsed_time = time.time() - start_time
+    if elapsed_time == 0: elapsed_time = 1
+    
+    speed = fetched / elapsed_time
+    percentage = (fetched * 100) / total if total > 0 else 0
+    
+    eta_seconds = ((total - fetched) / speed) if speed > 0 else 0
+    eta = get_readable_time(int(eta_seconds))
+    
+    progress_bar = "▰" * math.floor(percentage / 10) + "▱" * (10 - math.floor(percentage / 10))
+    
+    return Translation.TEXT.format(
+        status='running',
+        fetched=fetched,
+        total=total,
+        forwarded=forwarded,
+        skipped=0, # Not implemented
+        failed=failed,
+        duplicates=0, # Not implemented
+        progress_bar=progress_bar,
+        percentage=f"{percentage:.2f}",
+        eta=eta
+    )
