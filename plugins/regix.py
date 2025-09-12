@@ -5,8 +5,8 @@ from .utils import STS
 from database import db
 from .test import CLIENT, start_clone_bot
 from config import Config, temp
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, UserAlreadyParticipant, PeerIdInvalid, ChatAdminRequired
+from pyrogram import Client, filters, enums
+from pyrogram.errors import FloodWait, UserNotParticipant, PeerIdInvalid, ChatAdminRequired
 from pyrogram.types import CallbackQuery, ChatPrivileges
 
 logger = logging.getLogger(__name__)
@@ -42,12 +42,11 @@ async def pub_(bot, cb: CallbackQuery):
         
         target_chat_id = session['to_chat_id']
         
-        await m.edit("`Step 1/3: Starting Worker Bots (this may take a moment)...`")
-        # We start the worker clients early to get their usernames.
+        await m.edit("`Step 1/3: Starting Worker Bots...`")
         for config in worker_configs:
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
 
-        await m.edit("`Step 2/3: Manager is adding and promoting workers...`")
+        await m.edit("`Step 2/3: Checking and promoting workers...`")
         
         worker_privileges = ChatPrivileges(
             can_post_messages=True,
@@ -57,24 +56,40 @@ async def pub_(bot, cb: CallbackQuery):
 
         for i, worker in enumerate(worker_clients):
             worker_username = worker.me.username
-            await m.edit(f"`Step 2/3: Promoting @{worker_username} ({i+1}/{len(worker_clients)})...`")
-            
-            # --- THIS IS THE CORE FIX ---
-            # The Manager Userbot now promotes the Worker Bot using its @username.
-            # This is the correct way to add a bot directly as an admin to a channel.
             if not worker_username:
                 return await m.edit(f"**Setup Error:**\nWorker Bot `{worker.me.first_name}` does not have a public @username. Please set one in @BotFather and try again.")
-            
+
+            # --- THIS IS THE CORE FIX ---
+            # The Manager now checks the status of the Worker Bot before acting.
+            await m.edit(f"`Step 2/3: Checking status of @{worker_username} ({i+1}/{len(worker_clients)})...`")
+            try:
+                member = await manager_client.get_chat_member(target_chat_id, worker.me.id)
+                # If the worker is already an admin, check its permissions.
+                if member.status == enums.ChatMemberStatus.ADMINISTRATOR:
+                    if member.privileges and member.privileges.can_post_messages:
+                        await m.edit(f"`Step 2/3: @{worker_username} is already a suitable admin. Skipping.`")
+                        continue # Skip to the next worker
+                    else:
+                        await m.edit(f"`Step 2/3: @{worker_username} is admin but lacks permissions. Promoting again...`")
+            except UserNotParticipant:
+                # The worker is not in the channel, so we need to promote it.
+                pass 
+            except Exception as e:
+                 logger.warning(f"Could not get chat member for @{worker_username}: {e}. Proceeding with promotion attempt.")
+
+            # If the worker is not a suitable admin, promote it.
+            await m.edit(f"`Step 2/3: Promoting @{worker_username} ({i+1}/{len(worker_clients)})...`")
             try:
                 await manager_client.promote_chat_member(
                     chat_id=target_chat_id,
-                    user_id=f"@{worker_username}", # Using the username string
+                    user_id=f"@{worker_username}",
                     privileges=worker_privileges
                 )
             except ChatAdminRequired as e:
                  return await m.edit(f"**Setup Error:**\nManager Userbot failed to promote `@{worker_username}`.\nError: `{e}`\n\nPlease ensure the Manager Userbot has the 'Add New Admins' permission in the target channel.")
             except Exception as e:
                  return await m.edit(f"**Setup Error:**\nAn unexpected error occurred while promoting `@{worker_username}`.\nError: `{e}`")
+        # --- END OF FIX ---
 
         await m.edit("`Step 3/3: Starting Fetcher Client...`")
         fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
