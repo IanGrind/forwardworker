@@ -36,28 +36,9 @@ async def run(bot, message):
     temp.USER_STATES.pop(user_id, None)
     
     bots = await db.get_bots(user_id)
-    if not bots: return await message.reply("You haven't added any bots or userbots. Please add one in `/settings` to act as the **Operator**.")
+    if not bots: return await message.reply("You haven't added any bots or userbots. These will act as your **Operators**. Please add at least one in `/settings`.")
 
-    # A check to ensure workers are configured before starting the process
-    workers = await db.get_worker_bots(user_id)
-    if not workers:
-        return await message.reply("⚠️ **Setup Incomplete:**\nYou must add at least one **Worker Bot** in `/settings` -> `Worker Bots` to perform the forwarding.")
-
-    if len(bots) == 1:
-        temp.USER_STATES[user_id] = {'bot_id': bots[0]['id']}
-        await prompt_target_channel(bot, message)
-    else:
-        buttons = [[InlineKeyboardButton(b['name'], callback_data=f"fwd_select_op_{b['id']}")] for b in bots]
-        buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-        await message.reply("<b>Step 1: Select the Operator</b>\n\nThis bot/userbot will be used to read messages from the source channel.", reply_markup=InlineKeyboardMarkup(buttons))
-
-@Client.on_callback_query(filters.regex(r'^fwd_select_op_'))
-async def cb_select_operator(bot, query):
-    user_id = query.from_user.id
-    bot_id = int(query.data.split('_')[-1])
-    temp.USER_STATES[user_id] = {'bot_id': bot_id}
-    await query.message.delete()
-    await prompt_target_channel(bot, query.message)
+    await prompt_target_channel(bot, message)
 
 async def prompt_target_channel(bot, message):
     channels = await db.get_user_channels(message.chat.id)
@@ -65,19 +46,17 @@ async def prompt_target_channel(bot, message):
     
     buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in channels]
     buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-    await message.reply("<b>Step 2: Select the Target Channel</b>", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply("<b>Step 1: Select the Target Channel</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^fwd_target_'))
 async def cb_select_target(bot, query):
     user_id = query.from_user.id
-    state = temp.USER_STATES.get(user_id)
-    if not state or 'bot_id' not in state:
-        return await query.message.edit("Error: Operator Bot selection was lost. Please start over.")
-
-    state['to_chat_id'] = int(query.data.split('_')[-1])
     prompt = await query.message.edit_text(Translation.FROM_MSG)
-    state['state'] = "awaiting_source"
-    state['prompt_message_id'] = prompt.id
+    temp.USER_STATES[user_id] = {
+        "state": "awaiting_source",
+        "to_chat_id": int(query.data.split('_')[-1]),
+        "prompt_message_id": prompt.id
+    }
 
 @Client.on_message(filters.private & filters.incoming, group=-1)
 async def stateful_message_handler(bot: Client, message: Message):
@@ -99,25 +78,20 @@ async def stateful_message_handler(bot: Client, message: Message):
     
     if state_type == "awaiting_source":
         from_chat, end_id, error = parse_message_input(message)
-        bot_id = state.get("bot_id")
         to_chat_id = state.get("to_chat_id")
         temp.USER_STATES.pop(user_id, None)
         if error: return await message.reply(error)
         
+        # We need a temporary client just to get the title
+        bots = await db.get_bots(user_id)
         from_title = "Private Chat"
         try:
-            if not bot_id: return await message.reply("⚠️ Error: Operator selection lost. Please start over.")
-            bot_config = await db.get_bot(user_id, bot_id)
-            if not bot_config: return await message.reply("⚠️ Error: Selected Operator not found in database.")
-            
-            async with CLIENT.client(bot_config) as temp_client:
+            async with CLIENT.client(bots[0]) as temp_client:
                 from_title = (await temp_client.get_chat(from_chat)).title
-        except PeerIdInvalid:
-             return await message.reply("⚠️ **Access Error:** The selected Operator is not a member of the source channel. Please add it and try again.")
         except Exception as e:
-            logger.error(f"Could not get chat title for {from_chat}. Error: {e}", exc_info=True)
+            logger.warning(f"Could not get chat title with first bot. This is non-critical. Error: {e}")
         
-        await start_range_selection(bot, message, from_chat, from_title, to_chat_id, 1, end_id, bot_id=bot_id)
+        await start_range_selection(bot, message, from_chat, from_title, to_chat_id, 1, end_id)
 
     elif state_type == "awaiting_range_edit":
         session_id = state.get("session_id")
@@ -197,10 +171,7 @@ async def show_final_confirmation(bot, query, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return await bot.send_message(user_id, "⚠️ Your session has expired. Please start over.")
     
-    bot_id = session.get('bot_id')
-    if not bot_id: return await bot.send_message(user_id, "⚠️ Operator Bot selection lost. Please start over.")
-    
-    _bot = await db.get_bot(user_id, bot_id)
+    operators = await db.get_bots(user_id)
     to_title = (await db.get_channel_details(user_id, session['to_chat_id']))['title']
     
     forward_id = generate_short_id()
@@ -208,9 +179,15 @@ async def show_final_confirmation(bot, query, session_id):
     
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
     
-    await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
-        botname=_bot['name'], botuname=_bot.get('username', 'N/A'), from_chat=session['from_title'], to_chat=to_title,
-        message_range=f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"),
+    # We just use the first operator's name for the display message
+    operator_name = operators[0]['name'] if operators else "N/A"
+    
+    await bot.send_message(user_id, f"<b>Final Check</b>\n\n"
+        f"● <b>Source:</b> `{session['from_title']}`\n"
+        f"● <b>Target:</b> `{to_title}`\n"
+        f"● <b>Range:</b> `{min(session['start_id'], session['end_id'])}` to `{max(session['start_id'], session['end_id'])}`\n"
+        f"● <b>Operators:</b> `{len(operators)}` bots/userbots will be used for this task.\n\n"
+        f"<i>Ensure all Operators are members of the source channel and admins in the target channel.</i>",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}")],
             [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
