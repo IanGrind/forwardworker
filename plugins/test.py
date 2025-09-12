@@ -14,11 +14,20 @@ logger = logging.getLogger(__name__)
 
 SESSION_STRING_SIZE = 351
 
-async def start_clone_bot(FwdBot, bot_data):
-   # This function now correctly receives bot_data but doesn't need to use it here.
-   # The FwdBot is already configured from the CLIENT class.
-   await FwdBot.start()
-   return FwdBot
+async def start_clone_bot(client_instance, bot_data):
+    """Starts the client and performs a type-specific wake-up routine."""
+    await client_instance.start()
+    
+    # Userbots use get_dialogs, regular bots use get_me()
+    if not bot_data.get('is_bot', True):
+        # This is a userbot, so we wake it up by fetching dialogs.
+        async for _ in client_instance.get_dialogs(limit=1):
+            pass
+    else:
+        # This is a regular bot, so we use the safe get_me() method.
+        await client_instance.get_me()
+        
+    return client_instance
 
 class CLIENT: 
   def __init__(self):
@@ -40,7 +49,6 @@ class CLIENT:
     token = token_match.group(1)
     
     try:
-        # Use self.client() here to properly create the client instance
         async with self.client({'token': token, 'is_bot': True}) as _client:
             _bot = await _client.get_me()
         
@@ -64,7 +72,6 @@ class CLIENT:
     token = token_match.group(1)
 
     try:
-        # Use self.client() here
         async with self.client({'token': token, 'is_bot': True}) as _client:
             _bot = await _client.get_me()
         
@@ -87,7 +94,6 @@ class CLIENT:
         return False
         
     try:
-        # Use self.client() here
         async with self.client({'session': session_string, 'is_bot': False}) as client:
             user = await client.get_me()
 
@@ -109,7 +115,6 @@ class CLIENT:
         logger.error(f"Error adding session string: {e}", exc_info=True)
         return False
 
-# Create a single instance of the class to be used everywhere
 CLIENT = CLIENT()
 
 async def update_configs(user_id, key, value):
