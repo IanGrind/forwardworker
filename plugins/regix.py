@@ -33,8 +33,12 @@ async def pub_(bot, cb: CallbackQuery):
         if not operator_configs:
             return await m.edit("Error: No Operator Bots/Userbots were found in your settings.")
         
-        # For simplicity and reliability, we'll use the first available operator
-        # This is the model from the reference repository
+        # --- THIS IS THE CORE FIX ---
+        # We fetch the user's custom settings, including the forward delay.
+        user_settings = await db.get_configs(user_id)
+        delay = user_settings.get('forward_delay', 0.5) # Default to 0.5 if not set
+        # --- END OF FIX ---
+        
         operator_config = operator_configs[0]
 
         await m.edit("`Step 1/2: Starting Operator...`")
@@ -82,7 +86,8 @@ async def pub_(bot, cb: CallbackQuery):
                     sts.add('failed')
                     logger.warning(f"Failed to copy message {message.id}: {e}")
                 
-                await asyncio.sleep(0.5) # A small, consistent delay
+                # Apply the user-defined delay
+                await asyncio.sleep(delay)
         
     except Exception as e:
         logger.error(f"A critical error occurred: {e}", exc_info=True)
@@ -98,5 +103,5 @@ async def pub_(bot, cb: CallbackQuery):
         
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
-        temp.CANCEL.pop(user_id, None) # Corrected this from frwd_id
+        temp.CANCEL.pop(user_id, None)
         temp.lock.pop(user_id, None)
