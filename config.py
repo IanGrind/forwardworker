@@ -1,68 +1,27 @@
-import asyncio
-import logging
-from config import temp
-from database import db
-from plugins.test import CLIENT
+importimport os
 
-logger = logging.getLogger(__name__)
-OPERATOR_START_TIMEOUT = 30  # Seconds
+class Config:
+    API_ID = os.environ.get("API_ID", "")
+    API_HASH = os.environ.get("API_HASH", "")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "") 
+    BOT_SESSION = os.environ.get("BOT_SESSION", "forward-bot")  
+    DB_URL = os.environ.get("DB_URL", "")
+    PORT = os.environ.get("PORT", "8080")
+    DB_NAME = os.environ.get("DB_NAME", "cluster0")
+    OWNER_ID = [int(id) for id in os.environ.get("OWNER_ID", '').split()]
 
-async def resilient_start_clone(config):
-    """Wrapper to start a clone with a timeout."""
-    try:
-        # We don't need the wake-up routine here as these are persistent clients
-        client = CLIENT.client(config)
-        await asyncio.wait_for(client.start(), timeout=OPERATOR_START_TIMEOUT)
-        return client, None
-    except asyncio.TimeoutError:
-        error_msg = f"Timed out after {OPERATOR_START_TIMEOUT}s"
-        return None, error_msg
-    except Exception as e:
-        return None, str(e)
 
-async def start_operators():
-    """
-    Starts all configured operator bots/userbots ONCE and stores them
-    in a persistent pool for reuse.
-    """
-    logger.info("Starting all persistent operator clients...")
-    temp.OPERATOR_CLIENTS = {}
-    
-    # We need a user ID to get the bots, we will use the owner's ID for this global startup
-    # This assumes the owner has configured the bots.
-    from config import Config
-    if not Config.OWNER_ID:
-        logger.warning("No OWNER_ID set, cannot start global operator bots.")
-        return
-        
-    user_id = Config.OWNER_ID[0]
-    operator_configs = await db.get_bots(user_id)
-    
-    if not operator_configs:
-        logger.info("No operator bots configured to start.")
-        return
-
-    start_tasks = [resilient_start_clone(config) for config in operator_configs]
-    results = await asyncio.gather(*start_tasks)
-    
-    successful_count = 0
-    for i, (client, error) in enumerate(results):
-        bot_name = operator_configs[i].get('name', f"Operator #{i+1}")
-        bot_id = operator_configs[i].get('id')
-        if client:
-            temp.OPERATOR_CLIENTS[bot_id] = client
-            successful_count += 1
-            logger.info(f"✅ Successfully started and authenticated operator: {bot_name} ({bot_id})")
-        else:
-            logger.error(f"❌ Failed to start operator {bot_name} ({bot_id}): {error}")
-            
-    logger.info(f"Operator startup complete. {successful_count}/{len(operator_configs)} clients are running and persistent.")
-
-async def stop_operators():
-    """Stops all running operator clients."""
-    logger.info("Stopping all persistent operator clients...")
-    stop_tasks = [
-        client.stop() for client in temp.OPERATOR_CLIENTS.values() if client.is_connected
-    ]
-    await asyncio.gather(*stop_tasks, return_exceptions=True)
-    logger.info("All operator clients have been stopped.")
+class temp(object): 
+    lock = {}
+    CANCEL = {}
+    forwardings = 0
+    BANNED_USERS = []
+    IS_FRWD_CHAT = []
+    RANGE_SESSIONS = {}
+    FORWARD_SESSIONS = {}
+    USER_STATES = {}
+    ACTIVE_TASKS = {}
+    FORWARD_BOT_ID = {}
+    UNEQUIFY_USERBOT_ID = {}
+    # NEW: A persistent pool for running operator clients
+    OPERATOR_CLIENTS = {}
