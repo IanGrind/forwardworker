@@ -35,6 +35,7 @@ async def pub_(bot, cb: CallbackQuery):
         
         user_settings = await db.get_configs(user_id)
         delay = user_settings.get('forward_delay', 0.5)
+        logger.info(f"Using forward delay of {delay} seconds for user {user_id}.")
         
         operator_config = operator_configs[0]
 
