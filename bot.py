@@ -40,12 +40,9 @@ class Bot(Client):
             await super().start()
             
         me = await self.get_me()
-        logging.info(f"{me.first_name} with for pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
-        self.id = me.id
-        self.username = me.username
-        self.first_name = me.first_name
-        self.set_parse_mode(ParseMode.DEFAULT)
+        logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
         
+        # Load initial data now that the bot and db are ready.
         temp.BANNED_USERS = await db.get_banned()
 
         # Start the web server
