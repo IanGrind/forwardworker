@@ -1,6 +1,6 @@
 import os
 import sys
-import asyncio 
+import asyncio
 import random
 import logging
 import re
@@ -18,7 +18,7 @@ from pyrogram.errors import FloodWait
 
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
-BATCH_SIZE = 100 
+BATCH_SIZE = 100
 OPERATOR_START_TIMEOUT = 30
 
 def generate_short_id(length=8):
@@ -51,7 +51,7 @@ class WorkerManager:
                 continue
 
             active_client = self.clients.popleft()
-            
+
             try:
                 await self.process_batch(active_client)
                 self.clients.append(active_client)
@@ -59,12 +59,15 @@ class WorkerManager:
                     await asyncio.sleep(self.delay_between_batches)
             except FloodWait as e:
                 cooldown_duration = e.value + 5
+                logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
-            except Exception:
-                self.clients.append(active_client)
-            
+            except Exception as e:
+                logger.error(f"Worker {active_client.me.first_name} failed with {type(e).__name__}. Cooldown for 10s.")
+                cooldown_duration = 10 # Short cooldown for generic errors
+                self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
+
             self.check_cooldowns()
-    
+
     async def process_batch(self, client):
         message_batch = self.job_queue.popleft()
         try:
@@ -82,6 +85,8 @@ class WorkerManager:
             self.sts.add('failed', len(message_batch))
             self.sts.add('fetched', len(message_batch))
             logger.error(f"Failed to process batch: {e}")
+            self.job_queue.appendleft(message_batch) # Re-queue the failed batch
+            raise e # Re-raise the exception to be handled by the start method
 
     def check_cooldowns(self):
         now = asyncio.get_running_loop().time()
@@ -89,7 +94,7 @@ class WorkerManager:
         for worker in ready_workers:
             self.clients.append(worker)
             del self.cooldown_workers[worker]
-            
+
     def cancel(self):
         self.is_cancelled = True
 
@@ -118,19 +123,19 @@ async def pub_(bot, cb: CallbackQuery):
 
     await cb.answer()
     m = await cb.message.edit("`Initializing...`")
-    
+
     operator_clients = []
-    
+
     try:
         operator_configs = await db.get_bots(user_id)
         if not operator_configs:
             raise ValueError("No Operator Bots/Userbots found.")
-        
+
         await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
-        
+
         start_tasks = [resilient_start_clone(config) for config in operator_configs]
         results = await asyncio.gather(*start_tasks)
-        
+
         successful_clients = []
         report = ["<b>Operator Startup Report:</b>"]
         for i, (client, error) in enumerate(results):
@@ -140,7 +145,7 @@ async def pub_(bot, cb: CallbackQuery):
                 report.append(f"✅ <code>{name}</code> - <b>Success!</b>")
             else:
                 report.append(f"❌ <code>{name}</code> - <b>Failed:</b> <code>{error}</code>")
-        
+
         await m.edit("\n".join(report))
         await asyncio.sleep(4)
 
@@ -156,26 +161,26 @@ async def pub_(bot, cb: CallbackQuery):
             raise ValueError(f"Operator {operator_clients[0].me.first_name} could not access a required chat.\n\nError: {e}")
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-        
+
         await m.edit("`Step 3/4: Populating batch queue...`")
         start_id, end_id = min(sts.start_id, sts.end_id), max(sts.start_id, sts.end_id)
-        
+
         job_queue = deque(
             list(range(i, min(i + BATCH_SIZE, end_id + 1)))
             for i in range(start_id, end_id + 1, BATCH_SIZE)
         )
-        
+
         temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m}}
         temp.lock[user_id] = True
 
         await m.edit(f"`Step 4/4: Deploying workers...`")
-        
+
         reporter_task = asyncio.create_task(edit_progress(m, sts, sts.get('start')))
-        
+
         user_settings = await db.get_configs(user_id)
         delay = user_settings.get('forward_delay', 0)
         manager = WorkerManager(operator_clients, job_queue, sts, delay)
-        
+
         cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
         await manager.start()
 
@@ -191,7 +196,7 @@ async def pub_(bot, cb: CallbackQuery):
         logger.info("Cleaning up resources...")
         stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
-        
+
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
         temp.CANCEL.pop(frwd_id, None)
@@ -308,17 +313,17 @@ async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return await bot.send_message(user_id, "Session expired.")
-    
+
     operators = await db.get_bots(user_id)
     to_title = (await db.get_channel_details(user_id, session['to_chat_id']))['title']
-    
+
     forward_id = generate_short_id()
     temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-    
+
     await bot.send_message(user_id, f"<b>Final Check</b>\n\n"
-        f"● <b>Source:</b> `{session['from_title']}`\n"
-        f"● <b>Target:</b> `{to_title}`\n"
+        f"● <b>Source:</b> <code>{session['from_title']}</code>\n"
+        f"● <b>Target:</b> <code>{to_title}</code>\n"
         f"● <b>Range:</b> `{min(session['start_id'], session['end_id'])}` to `{max(session['start_id'], session['end_id'])}`\n"
         f"● <b>Operators:</b> `{len(operators)}` will be used.\n\n"
         f"<i>Ensure operators are in both channels!</i>",
@@ -346,7 +351,7 @@ async def settings_query_handler(bot, query):
         parts = query.data.split("#")
         menu, *args = parts[1].split('_', 1)
         value = args[0] if args else None
-        
+
         if menu == "main": await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]]))
         elif menu == "bots": await list_bots(bot, user_id, message=query.message)
         elif menu == "channels": await list_channels(bot, user_id, message=query.message)
@@ -368,7 +373,7 @@ async def forward_delay(client: Client, message: Message):
     if (await db.get_ban_status(user_id))["is_banned"]: return await message.reply_text("Access denied.")
     user_configs = await db.get_configs(user_id)
     delay = user_configs.get('forward_delay', 0)
-    if len(message.command) < 2: 
+    if len(message.command) < 2:
         return await message.reply_text(f"<b>Batch Delay:</b> `{delay}s`\n\nTo change, use `/forwardelay [seconds]`.")
     try:
         new_delay = float(message.command[1])
@@ -488,7 +493,7 @@ async def back_to_start(bot, query):
        caption=Translation.START_TXT.format(query.from_user.first_name),
        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Help', callback_data='help'), InlineKeyboardButton('About', callback_data='about')]])
     )
-    
+
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
     await query.message.edit_text(
@@ -499,4 +504,3 @@ async def helpcb(bot, query):
 @Client.on_callback_query(filters.regex(r'^about'))
 async def about(bot, query):
     await query.message.edit_caption(caption=Translation.ABOUT_TXT.format(bot.me.mention), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='back')]]))
-
