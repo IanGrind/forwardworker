@@ -1,5 +1,3 @@
-# iangrind/forwardworker/forwardworker-1ff680b8c32922eb74e103a193e108a8d299c7bc/plugins/forward_engine.py
-
 import os
 import sys
 import asyncio 
@@ -380,7 +378,10 @@ async def forward_delay(client: Client, message: Message):
     except ValueError: await message.reply_text("Invalid number.")
     except Exception as e: await message.reply_text(f"Error: {e}")
 
-@Client.on_message(filters.private & filters.incoming & ~filters.command())
+# CORRECTED: The list of commands to ignore is now properly passed to the filter.
+@Client.on_message(filters.private & filters.incoming & ~filters.command([
+    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"
+]))
 async def universal_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
@@ -498,3 +499,4 @@ async def helpcb(bot, query):
 @Client.on_callback_query(filters.regex(r'^about'))
 async def about(bot, query):
     await query.message.edit_caption(caption=Translation.ABOUT_TXT.format(bot.me.mention), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='back')]]))
+
