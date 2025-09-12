@@ -56,13 +56,13 @@ class STS:
         if self.data.get(self.id) and key in self.data[self.id]:
             self.data[self.id][key] += value
 
-async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id, bot_id):
+async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id):
     session_id = str(uuid4())
     temp.RANGE_SESSIONS[session_id] = {
-        'user_id': message.chat.id, 'chat_id': message.chat.id,
+        'user_id': message.chat.id,
         'from_chat_id': from_chat_id, 'from_title': from_title,
         'to_chat_id': to_chat_id, 'start_id': start_id, 'end_id': end_id,
-        'order': 'asc', 'bot_id': bot_id, 'original_message_id': message.id
+        'original_message_id': message.id
     }
     await update_range_message(bot, session_id)
 
@@ -70,18 +70,17 @@ async def update_range_message(bot, session_id, message_to_edit=None):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
 
-    order_text = "Oldest ➔ Newest" if session['order'] == 'asc' else "Newest ➔ Oldest"
     text = Translation.RANGE_SELECTION_TXT.format(
         start=min(session['start_id'], session['end_id']), 
         end=max(session['start_id'], session['end_id'])
     )
     
     buttons = [
-        [InlineKeyboardButton(f"Range: {session['start_id']} ➔ {session['end_id']} ({order_text})", callback_data="noop")],
+        [InlineKeyboardButton(f"Range: {session['start_id']} ➔ {session['end_id']}", callback_data="noop")],
         [InlineKeyboardButton("✎ Edit Start", callback_data=f"range_edit_start_{session_id}"),
          InlineKeyboardButton("✎ Edit End", callback_data=f"range_edit_end_{session_id}")],
-        [InlineKeyboardButton("⇄ Swap Order", callback_data=f"range_swap_{session_id}")],
-        [InlineKeyboardButton("✓ Confirm Range", callback_data=f"range_confirm_{session_id}")],
+        [InlineKeyboardButton("⇄ Swap", callback_data=f"range_swap_{session_id}")],
+        [InlineKeyboardButton("✓ Confirm", callback_data=f"range_confirm_{session_id}")],
         [InlineKeyboardButton("« Cancel", callback_data=f"range_cancel_{session_id}")]
     ]
     
@@ -89,8 +88,9 @@ async def update_range_message(bot, session_id, message_to_edit=None):
         if message_to_edit:
             await message_to_edit.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons))
         else:
+            # We reply to the original /forward command message
             await bot.send_message(
-                chat_id=session['chat_id'], text=text,
+                chat_id=session['user_id'], text=text,
                 reply_markup=InlineKeyboardMarkup(buttons),
                 reply_to_message_id=session['original_message_id']
             )
@@ -98,39 +98,23 @@ async def update_range_message(bot, session_id, message_to_edit=None):
         logger.error(f"Error in update_range_message: {e}", exc_info=True)
 
 async def edit_progress(message, sts, start_time, done=False):
-    """
-    Handles both periodic progress updates and the final completion message.
-    This function is now designed to be run as a cancellable asyncio task.
-    """
     try:
         while not temp.CANCEL.get(sts.id):
             text = progress_text(sts, start_time)
             await message.edit_text(text)
-            await asyncio.sleep(5) # Update interval
+            await asyncio.sleep(5)
     except asyncio.CancelledError:
-        # This is the expected way to stop the reporter task.
-        pass
-    except MessageNotModified:
-        # It's okay if the message hasn't changed, just continue the loop.
-        await asyncio.sleep(5)
+        pass # Task was cancelled, this is expected
     except Exception as e:
-        logger.warning(f"Failed to edit progress message: {e}")
-
-    # After the loop is broken or cancelled, send the final status.
-    if temp.CANCEL.get(sts.id):
-         await message.edit_text("✅ **Task Cancelled by user!**")
-    else:
+        logger.warning(f"Progress update failed: {e}")
+    finally:
+        # Send one final update
         text = progress_text(sts, start_time, done=True)
         try:
             await message.edit_text(text)
-        except MessageNotModified:
-            pass
-        except Exception as e:
-            logger.warning(f"Failed to edit final progress message: {e}")
-
+        except: pass
 
 def progress_text(sts, start_time, done=False):
-    """Formats the progress text."""
     total = sts.get('total')
     fetched = sts.get('fetched')
     forwarded = sts.get('total_files')
@@ -140,8 +124,9 @@ def progress_text(sts, start_time, done=False):
     if elapsed_time == 0: elapsed_time = 1
     
     if done:
+        status = "Completed" if not temp.CANCEL.get(sts.id) else "Cancelled"
         return (
-            f"✅ **Forwarding Complete!**\n\n"
+            f"✅ **Task {status}!**\n\n"
             f"**Total Forwarded:** `{forwarded}`\n"
             f"**Total Failed:** `{failed}`\n"
             f"**Time Taken:** `{get_readable_time(int(elapsed_time))}`"
@@ -149,25 +134,14 @@ def progress_text(sts, start_time, done=False):
 
     speed = fetched / elapsed_time
     percentage = (fetched * 100) / total if total > 0 else 0
-    
-    eta_seconds = ((total - fetched) / speed) if speed > 0 else 0
-    eta = get_readable_time(int(eta_seconds))
-    
+    eta = get_readable_time(int(((total - fetched) / speed) if speed > 0 else 0))
     progress_bar = "▰" * math.floor(percentage / 10) + "▱" * (10 - math.floor(percentage / 10))
     
-    # Worker statuses report
-    worker_lines = []
-    if hasattr(sts, 'worker_statuses'):
-        for i, status in sts.worker_statuses.items():
-            worker_lines.append(f"  `Worker {i+1}: {status}`")
-    worker_report = "\n".join(worker_lines)
-
     return (
         f"<b>Status:</b> `Running`\n"
         f"<b>Progress:</b> `{fetched} / {total}`\n"
         f"{progress_bar} `({percentage:.2f}%)`\n\n"
         f"<b>Forwarded:</b> `{forwarded}`\n"
         f"<b>Failed:</b> `{failed}`\n"
-        f"<b>ETA:</b> `{eta}`\n\n"
-        f"<b>Worker Statuses:</b>\n{worker_report}"
+        f"<b>ETA:</b> `{eta}`"
     )
