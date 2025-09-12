@@ -46,7 +46,6 @@ class Bot(Client):
         self.first_name = me.first_name
         self.set_parse_mode(ParseMode.DEFAULT)
         
-        # This line will now work correctly.
         temp.BANNED_USERS = await db.get_banned()
 
         # Start the web server
