@@ -1,3 +1,5 @@
+# iangrind/forwardworker/forwardworker-1ff680b8c32922eb74e103a193e108a8d299c7bc/plugins/regix.py
+
 import asyncio
 import logging
 import time
@@ -35,7 +37,7 @@ async def pub_(bot, cb: CallbackQuery):
         
         user_settings = await db.get_configs(user_id)
         delay = user_settings.get('forward_delay', 0.5)
-        logger.info(f"Using forward delay of {delay} seconds for user {user_id}.")
+        logger.info(f"[USER: {user_id}] Using forward delay of {delay} seconds for this task.")
         
         operator_config = operator_configs[0]
 
