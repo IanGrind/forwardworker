@@ -5,6 +5,7 @@ import random
 from database import db
 from config import Config, temp
 from translation import Translation
+from .utils import update_configs
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 
@@ -15,11 +16,6 @@ main_buttons = [[
         InlineKeyboardButton('About', callback_data='about')
 ]]
 
-async def update_configs(user_id, key, value):
-    """Helper function to update a specific config key."""
-    configs = await db.get_configs(user_id)
-    configs[key] = value
-    await db.update_configs(user_id, configs)
 
 @Client.on_message(filters.private & filters.command(['start']))
 async def start(client, message):
