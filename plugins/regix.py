@@ -48,7 +48,7 @@ async def pub_(bot, cb: CallbackQuery):
         
         # --- THIS IS THE CORE FIX ---
         await m.edit("`Step 2/4: Orienting clients (allowing time to sync)...`")
-        await asyncio.sleep(2) # Crucial delay to allow clients to sync their initial state.
+        await asyncio.sleep(3) # Crucial delay to allow clients to sync their initial state.
         
         target_chat_id = session['to_chat_id']
         source_chat_id = session['from_chat_id']
