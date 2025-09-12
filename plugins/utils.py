@@ -3,6 +3,7 @@ import random
 import time
 import math
 import logging
+import asyncio
 from uuid import uuid4
 from database import db
 from config import temp
@@ -96,17 +97,39 @@ async def update_range_message(bot, session_id, message_to_edit=None):
     except Exception as e:
         logger.error(f"Error in update_range_message: {e}", exc_info=True)
 
-async def edit_progress(message, sts, start_time):
-    """Refreshes the progress message."""
+async def edit_progress(message, sts, start_time, done=False):
+    """
+    Handles both periodic progress updates and the final completion message.
+    This function is now designed to be run as a cancellable asyncio task.
+    """
     try:
-        text = progress_text(sts, start_time)
-        await message.edit_text(text)
-    except MessageNotModified:
+        while not temp.CANCEL.get(sts.id):
+            text = progress_text(sts, start_time)
+            await message.edit_text(text)
+            await asyncio.sleep(5) # Update interval
+    except asyncio.CancelledError:
+        # This is the expected way to stop the reporter task.
         pass
+    except MessageNotModified:
+        # It's okay if the message hasn't changed, just continue the loop.
+        await asyncio.sleep(5)
     except Exception as e:
         logger.warning(f"Failed to edit progress message: {e}")
 
-def progress_text(sts, start_time):
+    # After the loop is broken or cancelled, send the final status.
+    if temp.CANCEL.get(sts.id):
+         await message.edit_text("✅ **Task Cancelled by user!**")
+    else:
+        text = progress_text(sts, start_time, done=True)
+        try:
+            await message.edit_text(text)
+        except MessageNotModified:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to edit final progress message: {e}")
+
+
+def progress_text(sts, start_time, done=False):
     """Formats the progress text."""
     total = sts.get('total')
     fetched = sts.get('fetched')
@@ -116,6 +139,14 @@ def progress_text(sts, start_time):
     elapsed_time = time.time() - start_time
     if elapsed_time == 0: elapsed_time = 1
     
+    if done:
+        return (
+            f"✅ **Forwarding Complete!**\n\n"
+            f"**Total Forwarded:** `{forwarded}`\n"
+            f"**Total Failed:** `{failed}`\n"
+            f"**Time Taken:** `{get_readable_time(int(elapsed_time))}`"
+        )
+
     speed = fetched / elapsed_time
     percentage = (fetched * 100) / total if total > 0 else 0
     
@@ -124,15 +155,19 @@ def progress_text(sts, start_time):
     
     progress_bar = "▰" * math.floor(percentage / 10) + "▱" * (10 - math.floor(percentage / 10))
     
-    return Translation.TEXT.format(
-        status='running',
-        fetched=fetched,
-        total=total,
-        forwarded=forwarded,
-        skipped=0, # Not implemented
-        failed=failed,
-        duplicates=0, # Not implemented
-        progress_bar=progress_bar,
-        percentage=f"{percentage:.2f}",
-        eta=eta
+    # Worker statuses report
+    worker_lines = []
+    if hasattr(sts, 'worker_statuses'):
+        for i, status in sts.worker_statuses.items():
+            worker_lines.append(f"  `Worker {i+1}: {status}`")
+    worker_report = "\n".join(worker_lines)
+
+    return (
+        f"<b>Status:</b> `Running`\n"
+        f"<b>Progress:</b> `{fetched} / {total}`\n"
+        f"{progress_bar} `({percentage:.2f}%)`\n\n"
+        f"<b>Forwarded:</b> `{forwarded}`\n"
+        f"<b>Failed:</b> `{failed}`\n"
+        f"<b>ETA:</b> `{eta}`\n\n"
+        f"<b>Worker Statuses:</b>\n{worker_report}"
     )
