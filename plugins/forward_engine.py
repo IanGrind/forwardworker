@@ -12,7 +12,8 @@ from collections import deque
 from database import db
 from config import Config, temp
 from translation import Translation
-from .utils import update_configs, start_range_selection, update_range_message, STS
+# CORRECTED: Added 'edit_progress' to the import list
+from .utils import update_configs, start_range_selection, update_range_message, STS, edit_progress
 from .test import CLIENT, start_clone_bot
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
@@ -21,6 +22,7 @@ from pyrogram.errors import FloodWait
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 100 # Telegram API's limit for forward_messages
+OPERATOR_START_TIMEOUT = 30 # Seconds to wait for a single operator to start
 
 def generate_short_id(length=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
@@ -41,7 +43,6 @@ class WorkerManager:
 
     async def start(self):
         logger.info(f"WorkerManager started with {len(self.clients)} workers for batch forwarding.")
-        # CORRECTED: Use truthiness to check if deque is empty. ".empty()" was the bug.
         while self.job_queue and not self.is_cancelled:
             if not self.clients:
                 if self.cooldown_workers:
@@ -103,6 +104,20 @@ class WorkerManager:
     def cancel(self):
         self.is_cancelled = True
 
+async def resilient_start_clone(config):
+    """Wrapper to start a clone with a timeout."""
+    try:
+        client = await asyncio.wait_for(
+            start_clone_bot(CLIENT.client(config), config),
+            timeout=OPERATOR_START_TIMEOUT
+        )
+        return client, None
+    except asyncio.TimeoutError:
+        error_msg = f"Timed out after {OPERATOR_START_TIMEOUT}s"
+        return None, error_msg
+    except Exception as e:
+        return None, str(e)
+
 @Client.on_callback_query(filters.regex(r'^start_public_'))
 async def pub_(bot, cb: CallbackQuery):
     user_id = cb.from_user.id
@@ -118,7 +133,6 @@ async def pub_(bot, cb: CallbackQuery):
     m = await cb.message.edit("`Initializing...`")
     
     operator_clients = []
-    sts = None
     
     try:
         operator_configs = await db.get_bots(user_id)
@@ -128,20 +142,27 @@ async def pub_(bot, cb: CallbackQuery):
         user_settings = await db.get_configs(user_id)
         delay = user_settings.get('forward_delay', 0)
         
-        await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
+        await m.edit(f"`Step 1/4: Concurrently starting {len(operator_configs)} operator(s) with a {OPERATOR_START_TIMEOUT}s timeout...`")
+        
+        start_tasks = [resilient_start_clone(config) for config in operator_configs]
+        results = await asyncio.gather(*start_tasks)
         
         successful_clients = []
-        for config in operator_configs:
-            try:
-                client = await start_clone_bot(CLIENT.client(config), config)
+        report_lines = ["<b>Operator Startup Report:</b>"]
+        for i, (client, error) in enumerate(results):
+            bot_name = operator_configs[i].get('name', f"Operator #{i+1}")
+            if client:
                 successful_clients.append(client)
-                logger.info(f"Successfully started operator: {client.me.first_name}")
-            except Exception as e:
-                logger.error(f"Failed to start operator with name {config.get('name', 'N/A')}: {e}")
+                report_lines.append(f"✅ <code>{bot_name}</code> - <b>Success!</b>")
+            else:
+                report_lines.append(f"❌ <code>{bot_name}</code> - <b>Failed:</b> <code>{error}</code>")
         
+        await m.edit("\n".join(report_lines))
+        await asyncio.sleep(4)
+
         operator_clients = successful_clients
         if not operator_clients:
-            raise ValueError("All operators failed to start. Check your tokens/sessions.")
+            raise ValueError("All operators failed to start. Please check your tokens/sessions in settings and try again.")
 
         await m.edit(f"`Step 2/4: Verifying channel access with {operator_clients[0].me.first_name}...`")
         try:
@@ -169,31 +190,18 @@ async def pub_(bot, cb: CallbackQuery):
         
         manager = WorkerManager(operator_clients, job_queue, sts, delay)
         
-        async def cancel_checker():
-            while not manager.is_cancelled:
-                if temp.CANCEL.get(frwd_id):
-                    manager.cancel()
-                    break
-                await asyncio.sleep(1)
-
-        cancel_task = asyncio.create_task(cancel_checker())
+        cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
         await manager.start()
 
-        # CORRECTED: This part now only runs if the loop completes without errors.
-        if not cancel_task.done():
-            cancel_task.cancel()
-        if not reporter_task.done():
-            reporter_task.cancel()
+        if not reporter_task.done(): reporter_task.cancel()
+        if not cancel_task.done(): cancel_task.cancel()
         await asyncio.sleep(0.1) 
         await edit_progress(m, sts, sts.get('start'), done=True)
 
-
     except Exception as e:
-        # CORRECTED: The error message will now persist.
         logger.error(f"A critical error occurred, halting task: {e}", exc_info=True)
         await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
     finally:
-        # CORRECTED: The finally block is now ONLY for cleanup.
         logger.info("Cleaning up forwarding task resources...")
         stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
@@ -203,6 +211,13 @@ async def pub_(bot, cb: CallbackQuery):
         temp.CANCEL.pop(frwd_id, None)
         temp.lock.pop(user_id, None)
         logger.info("Forwarding task fully cleaned up.")
+
+async def cancel_checker(frwd_id, manager):
+    while not manager.is_cancelled:
+        if temp.CANCEL.get(frwd_id):
+            manager.cancel()
+            break
+        await asyncio.sleep(1)
 
 #+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
 # USER COMMANDS & INTERFACE HANDLERS
