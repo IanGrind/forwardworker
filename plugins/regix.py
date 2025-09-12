@@ -2,7 +2,6 @@ import asyncio
 import logging
 import time
 import math
-from itertools import cycle
 from .utils import STS, edit_progress
 from database import db
 from .test import CLIENT, start_clone_bot
@@ -12,6 +11,49 @@ from pyrogram.errors import FloodWait, UserNotParticipant, PeerIdInvalid, ChatAd
 from pyrogram.types import CallbackQuery, ChatPrivileges
 
 logger = logging.getLogger(__name__)
+
+async def worker_task(worker_id, client, counter, lock, end_id, sts, frwd_id):
+    """
+    The core logic for each worker bot.
+    It atomically gets the next message ID from a shared counter.
+    """
+    while True:
+        if temp.CANCEL.get(frwd_id):
+            sts.worker_statuses[worker_id] = "Cancelled"
+            break
+
+        async with lock:
+            current_id = counter['value']
+            if current_id > end_id:
+                # All message IDs have been processed.
+                sts.worker_statuses[worker_id] = "Done"
+                break
+            # Increment the shared counter for the next worker
+            counter['value'] += 1
+
+        # The lock is now released, and this worker is responsible for `current_id`.
+        try:
+            sts.worker_statuses[worker_id] = f"Forwarding {current_id}"
+            await client.copy_message(
+                chat_id=sts.TO,
+                from_chat_id=sts.FROM,
+                message_id=current_id
+            )
+            sts.add('total_files')
+        except FloodWait as e:
+            sts.worker_statuses[worker_id] = f"Resting ({e.value}s)"
+            # This task failed due to floodwait, so we need to retry it.
+            # We'll put it back by decrementing the counter under the lock.
+            async with lock:
+                counter['value'] -= 1
+            await asyncio.sleep(e.value + 1)
+        except Exception as e:
+            logger.warning(f"Worker {worker_id} failed on message {current_id}: {e}")
+            sts.add('failed')
+        finally:
+            sts.add('fetched')
+            # A brief, non-blocking pause to prevent overwhelming the API.
+            await asyncio.sleep(0.2)
 
 @Client.on_callback_query(filters.regex(r'^start_public_'))
 async def pub_(bot, cb: CallbackQuery):
@@ -27,113 +69,67 @@ async def pub_(bot, cb: CallbackQuery):
     await cb.answer()
     m = await cb.message.edit("`Initializing task...`")
 
-    fetcher_client = None
-    manager_client = None
+    operator_client = None
     worker_clients = []
     
     try:
-        fetcher_config = await db.get_bot(user_id, session['bot_id'])
-        manager_config = await db.get_manager_userbot(user_id)
-        worker_configs = (await db.get_worker_bots(user_id))[:session['num_workers']]
+        operator_config = await db.get_bot(user_id, session['bot_id'])
+        worker_configs = await db.get_worker_bots(user_id)
 
-        if not fetcher_config or not manager_config or not worker_configs:
-            return await m.edit("Error: A required bot/userbot configuration was not found.")
+        if not operator_config or not worker_configs:
+            return await m.edit("Error: Operator or Worker Bot configurations were not found.")
 
-        await m.edit("`Step 1/4: Waking up clients...`")
-        manager_client = await start_clone_bot(CLIENT.client(manager_config), manager_config)
-        fetcher_client = await start_clone_bot(CLIENT.client(fetcher_config), fetcher_config)
+        await m.edit("`Step 1/3: Waking up clients...`")
+        operator_client = await start_clone_bot(CLIENT.client(operator_config), operator_config)
         for i, config in enumerate(worker_configs):
-            await m.edit(f"`Step 1/4: Waking up worker {i+1}/{len(worker_configs)}...`")
+            await m.edit(f"`Step 1/3: Waking up worker {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
         
-        # --- THIS IS THE CORE FIX ---
-        await m.edit("`Step 2/4: Orienting clients (allowing time to sync)...`")
-        await asyncio.sleep(3) # Crucial delay to allow clients to sync their initial state.
+        await m.edit("`Step 2/3: Orienting clients and verifying access...`")
+        await asyncio.sleep(2)
         
         target_chat_id = session['to_chat_id']
         source_chat_id = session['from_chat_id']
 
-        await m.edit("`Step 2/4: Verifying channel access...`")
         try:
-            await manager_client.get_chat(target_chat_id)
-        except PeerIdInvalid:
-            return await m.edit(f"**Setup Error:**\nThe Manager Userbot (`{manager_config['name']}`) cannot 'see' the target channel. This usually means it's not a member. Please add it and try again.")
-        
-        try:
-            await fetcher_client.get_chat(source_chat_id)
-        except PeerIdInvalid:
-             return await m.edit(f"**Setup Error:**\nThe Fetcher Bot/Userbot (`{fetcher_config['name']}`) cannot 'see' the source channel. Please ensure it is a member.")
-        except Exception as e:
-            return await m.edit(f"**Setup Error:**\nCould not access source channel with Fetcher. Error: `{e}`")
-        # --- END OF FIX ---
-
-        await m.edit("`Step 3/4: Promoting workers...`")
-        worker_privileges = ChatPrivileges(can_post_messages=True, can_edit_messages=True, can_delete_messages=True)
-
-        for i, worker in enumerate(worker_clients):
-            worker_username = worker.me.username
-            if not worker_username:
-                return await m.edit(f"**Setup Error:**\nWorker Bot `{worker.me.first_name}` does not have a public @username. Please set one in @BotFather.")
-            
-            await m.edit(f"`Step 3/4: Checking status of @{worker_username}...`")
-            try:
-                member = await manager_client.get_chat_member(target_chat_id, worker.me.id)
-                if member.status == enums.ChatMemberStatus.ADMINISTRATOR and member.privileges and member.privileges.can_post_messages:
-                    continue
-            except UserNotParticipant:
-                pass 
-            
-            await m.edit(f"`Step 3/4: Promoting @{worker_username}...`")
-            try:
-                await manager_client.promote_chat_member(target_chat_id, f"@{worker_username}", privileges=worker_privileges)
-            except Exception as e:
-                 return await m.edit(f"**Setup Error:**\nManager failed to promote `@{worker_username}`.\nError: `{e}`")
+            await operator_client.get_chat(source_chat_id)
+            for worker in worker_clients:
+                await worker.get_chat(target_chat_id)
+        except PeerIdInvalid as e:
+             return await m.edit(f"**Access Error:** A bot is not a member of a required channel. Please check your setup.\nDetails: {e}")
         
         sts = STS(frwd_id).store(From=source_chat_id, to=target_chat_id, start_id=session['start_id'], end_id=session['end_id'])
         
-        temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m, "details": {"type": "Forwarding", "from": session['from_title'], "to": "N/A"}}}
+        # Initialize the shared counter and lock for the assembly line model
+        counter = {'value': sts.start_id}
+        lock = asyncio.Lock()
+        
+        sts.worker_statuses = {i: "Idle" for i in range(len(worker_clients))}
+
+        temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m}}
         temp.lock[user_id] = True
+
+        await m.edit(f"`Step 3/3: Setup Complete!`\n\nStarting forward from **{session['from_title']}**...")
+        await asyncio.sleep(2) # A final brief pause before starting the intense work.
+
+        reporter = asyncio.create_task(edit_progress(m, sts, time.time(), is_reporter=True))
         
-        client_cycler = cycle(worker_clients)
+        worker_coroutines = [
+            worker_task(i, client, counter, lock, sts.end_id, sts, frwd_id)
+            for i, client in enumerate(worker_clients)
+        ]
         
-        await m.edit(f"✅ **Step 4/4: Setup Complete!**\n\nForwarding from **{session['from_title']}**...")
-        start_time = time.time()
-        last_edit_time = start_time
-        
-        message_ids = range(sts.start_id, sts.end_id + 1)
-        for chunk in [message_ids[i:i + 200] for i in range(0, len(message_ids), 200)]:
-            if temp.CANCEL.get(frwd_id):
-                await m.edit("Task cancelled by user.")
-                break
-            
-            messages = await fetcher_client.get_messages(sts.FROM, chunk)
-            for message in messages:
-                if temp.CANCEL.get(frwd_id): break
-                sts.add('fetched')
-                try:
-                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id)
-                    sts.add('total_files')
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 1)
-                    await next(client_cycler).copy_message(sts.TO, sts.FROM, message.id)
-                    sts.add('total_files')
-                except Exception as e:
-                    logger.warning(f"Failed to copy message {message.id}: {e}")
-                    sts.add('failed')
-                
-                current_time = time.time()
-                if current_time - last_edit_time > 5:
-                    await edit_progress(m, sts, start_time)
-                    last_edit_time = current_time
-        
-        if not temp.CANCEL.get(frwd_id):
-            await m.edit("✅ **Forwarding Complete!**")
+        await asyncio.gather(*worker_coroutines)
+        # Once all workers are done, we stop the reporter
+        reporter.cancel()
+        # Send one final update to show the completed state
+        await edit_progress(m, sts, sts.get('start'), done=True)
 
     except Exception as e:
         logger.error(f"A critical error occurred in the forwarding task: {e}", exc_info=True)
-        await m.edit(f"**A critical error occurred:**\n\n`{type(e).__name__}`: `{e}`\n\nPlease check the logs.")
+        await m.edit(f"**A critical error occurred:**\n\n`{type(e).__name__}`: `{e}`")
     finally:
-        all_clients = [fetcher_client, manager_client] + worker_clients
+        all_clients = [operator_client] + worker_clients
         for client in all_clients:
             if client and client.is_connected:
                 try: await client.stop()
