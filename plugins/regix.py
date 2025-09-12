@@ -13,10 +13,7 @@ from pyrogram.types import CallbackQuery, ChatPrivileges
 logger = logging.getLogger(__name__)
 
 async def worker_task(worker_id, client, counter, lock, end_id, sts, frwd_id):
-    """
-    The core logic for each worker bot.
-    It atomically gets the next message ID from a shared counter.
-    """
+    """The core logic for each worker bot using a shared counter."""
     while True:
         if temp.CANCEL.get(frwd_id):
             sts.worker_statuses[worker_id] = "Cancelled"
@@ -25,13 +22,10 @@ async def worker_task(worker_id, client, counter, lock, end_id, sts, frwd_id):
         async with lock:
             current_id = counter['value']
             if current_id > end_id:
-                # All message IDs have been processed.
                 sts.worker_statuses[worker_id] = "Done"
                 break
-            # Increment the shared counter for the next worker
             counter['value'] += 1
 
-        # The lock is now released, and this worker is responsible for `current_id`.
         try:
             sts.worker_statuses[worker_id] = f"Forwarding {current_id}"
             await client.copy_message(
@@ -42,8 +36,6 @@ async def worker_task(worker_id, client, counter, lock, end_id, sts, frwd_id):
             sts.add('total_files')
         except FloodWait as e:
             sts.worker_statuses[worker_id] = f"Resting ({e.value}s)"
-            # This task failed due to floodwait, so we need to retry it.
-            # We'll put it back by decrementing the counter under the lock.
             async with lock:
                 counter['value'] -= 1
             await asyncio.sleep(e.value + 1)
@@ -52,7 +44,6 @@ async def worker_task(worker_id, client, counter, lock, end_id, sts, frwd_id):
             sts.add('failed')
         finally:
             sts.add('fetched')
-            # A brief, non-blocking pause to prevent overwhelming the API.
             await asyncio.sleep(0.2)
 
 @Client.on_callback_query(filters.regex(r'^start_public_'))
@@ -71,6 +62,7 @@ async def pub_(bot, cb: CallbackQuery):
 
     operator_client = None
     worker_clients = []
+    reporter_task = None
     
     try:
         operator_config = await db.get_bot(user_id, session['bot_id'])
@@ -100,7 +92,6 @@ async def pub_(bot, cb: CallbackQuery):
         
         sts = STS(frwd_id).store(From=source_chat_id, to=target_chat_id, start_id=session['start_id'], end_id=session['end_id'])
         
-        # Initialize the shared counter and lock for the assembly line model
         counter = {'value': sts.start_id}
         lock = asyncio.Lock()
         
@@ -110,9 +101,10 @@ async def pub_(bot, cb: CallbackQuery):
         temp.lock[user_id] = True
 
         await m.edit(f"`Step 3/3: Setup Complete!`\n\nStarting forward from **{session['from_title']}**...")
-        await asyncio.sleep(2) # A final brief pause before starting the intense work.
+        await asyncio.sleep(2)
 
-        reporter = asyncio.create_task(edit_progress(m, sts, time.time(), is_reporter=True))
+        # Start the progress reporter as a background task
+        reporter_task = asyncio.create_task(edit_progress(m, sts, sts.get('start')))
         
         worker_coroutines = [
             worker_task(i, client, counter, lock, sts.end_id, sts, frwd_id)
@@ -120,15 +112,16 @@ async def pub_(bot, cb: CallbackQuery):
         ]
         
         await asyncio.gather(*worker_coroutines)
-        # Once all workers are done, we stop the reporter
-        reporter.cancel()
-        # Send one final update to show the completed state
-        await edit_progress(m, sts, sts.get('start'), done=True)
-
+        
     except Exception as e:
         logger.error(f"A critical error occurred in the forwarding task: {e}", exc_info=True)
         await m.edit(f"**A critical error occurred:**\n\n`{type(e).__name__}`: `{e}`")
     finally:
+        # Stop the reporter task gracefully and send a final update.
+        if reporter_task:
+            reporter_task.cancel()
+            await edit_progress(m, sts, sts.get('start'), done=True)
+
         all_clients = [operator_client] + worker_clients
         for client in all_clients:
             if client and client.is_connected:
