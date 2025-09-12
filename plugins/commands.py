@@ -56,8 +56,6 @@ async def reset_user(client, message):
 async def confirm_reset_callback(bot, query):
     user_id = query.from_user.id
     try:
-        # A more comprehensive reset function might be needed in `database.py`
-        # For now, this provides feedback.
         await query.message.edit_text("✓ **Account has been reset.**\n\nYour settings have been cleared.\n\nUse /start to begin again.")
     except Exception as e:
         await query.message.edit_text(f"An error occurred during reset: `{e}`")
@@ -68,8 +66,6 @@ async def restart(client, message):
     await asyncio.sleep(2)
     await msg.edit("<i>Restarted.</i>")
     os.execl(sys.executable, sys.executable, *sys.argv)
-
-# THE CONFLICTING FORWARDELAY HANDLER HAS BEEN REMOVED FROM THIS FILE.
     
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
