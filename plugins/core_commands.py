@@ -204,7 +204,7 @@ async def forward_delay(client: Client, message: Message):
     if ban_status["is_banned"]: return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
 
     user_configs = await db.get_configs(user_id)
-    current_delay = user_configs.get('forward_delay', 0.5)
+    current_delay = user_configs.get('forward_delay', 0)
 
     if len(message.command) < 2: return await message.reply_text(Translation.FORWARDELAY_TXT.format(current_delay=current_delay))
     
@@ -218,7 +218,9 @@ async def forward_delay(client: Client, message: Message):
 
 # --- Universal Message Handler for Interactive Sessions ---
 
-@Client.on_message(filters.private & filters.incoming & ~filters.command(["start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"]))
+@Client.on_message(filters.private & filters.incoming & ~filters.command([
+    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"
+]))
 async def universal_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
@@ -286,17 +288,19 @@ async def remove_and_go_back(bot, query, user_id, remove_func, item_id, success_
     elif back_menu == 'channels': await list_channels(bot, user_id, message=query.message)
 
 async def list_bots(bot, user_id, message=None, as_new=False):
-    buttons = [[InlineKeyboardButton(b['name'], callback_data=f"settings#editbot_{b['id']}")] for b in await db.get_bots(user_id)]
+    bots = await db.get_bots(user_id)
+    buttons = [[InlineKeyboardButton(b['name'], callback_data=f"settings#editbot_{b['id']}")] for b in bots]
     buttons += [[InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot")], [InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
-    text = "<b>֎ Bots & Userbots ֎</b>"
+    text = f"<b>֎ Bots & Userbots ({len(bots)}) ֎</b>"
     
     if as_new and message: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
     elif message: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def list_channels(bot, user_id, message=None, as_new=False):
-    buttons = [[InlineKeyboardButton(f"● {c['title']}", callback_data=f"settings#editchannels_{c['chat_id']}")] for c in await db.get_user_channels(user_id)]
+    channels = await db.get_user_channels(user_id)
+    buttons = [[InlineKeyboardButton(f"● {c['title']}", callback_data=f"settings#editchannels_{c['chat_id']}")] for c in channels]
     buttons += [[InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
-    text = "<b>֎ Target Channels ֎</b>"
+    text = f"<b>֎ Target Channels ({len(channels)}) ֎</b>"
 
     if as_new and message: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
     elif message: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
