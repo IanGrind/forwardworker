@@ -33,11 +33,8 @@ async def pub_(bot, cb: CallbackQuery):
         if not operator_configs:
             return await m.edit("Error: No Operator Bots/Userbots were found in your settings.")
         
-        # --- THIS IS THE CORE FIX ---
-        # We fetch the user's custom settings, including the forward delay.
         user_settings = await db.get_configs(user_id)
-        delay = user_settings.get('forward_delay', 0.5) # Default to 0.5 if not set
-        # --- END OF FIX ---
+        delay = user_settings.get('forward_delay', 0.5)
         
         operator_config = operator_configs[0]
 
@@ -86,7 +83,6 @@ async def pub_(bot, cb: CallbackQuery):
                     sts.add('failed')
                     logger.warning(f"Failed to copy message {message.id}: {e}")
                 
-                # Apply the user-defined delay
                 await asyncio.sleep(delay)
         
     except Exception as e:
