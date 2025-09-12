@@ -12,7 +12,7 @@ from collections import deque
 from database import db
 from config import Config, temp
 from translation import Translation
-# CORRECTED: Added 'edit_progress' to the import list
+# CORRECTED: Added 'edit_progress' to the import list, which was causing the NameError crash.
 from .utils import update_configs, start_range_selection, update_range_message, STS, edit_progress
 from .test import CLIENT, start_clone_bot
 from pyrogram import Client, filters, enums
@@ -491,8 +491,13 @@ async def universal_message_handler(bot: Client, message: Message):
         bots = await db.get_bots(user_id)
         from_title = "Private Chat"
         try:
-            async with CLIENT.client(bots[0]) as temp_client:
-                from_title = (await temp_client.get_chat(from_chat)).title
+            # Use a running client if available
+            if temp.OPERATOR_CLIENTS:
+                first_client = next(iter(temp.OPERATOR_CLIENTS.values()))
+                from_title = (await first_client.get_chat(from_chat)).title
+            else:
+                 async with CLIENT.client(bots[0]) as temp_client:
+                    from_title = (await temp_client.get_chat(from_chat)).title
         except Exception as e:
             logger.warning(f"Could not get chat title with first bot: {e}")
         
