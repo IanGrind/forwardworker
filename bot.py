@@ -40,11 +40,7 @@ class Bot(Client):
             await super().start()
             
         me = await self.get_me()
-        logging.info(f"{me.first_name} with for pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
-        self.id = me.id
-        self.username = me.username
-        self.first_name = me.first_name
-        self.set_parse_mode(ParseMode.DEFAULT)
+        logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
         
         temp.BANNED_USERS = await db.get_banned()
 
@@ -55,8 +51,7 @@ class Bot(Client):
         await web.TCPSite(app, bind_address, PORT).start()
         
         await idle()
-        logging.info("Bot has stopped.")
 
     async def stop(self, *args):
         await super().stop()
-        logging.info(f"@{self.username} stopped. Bye.")
+        logging.info("Bot has stopped.")
