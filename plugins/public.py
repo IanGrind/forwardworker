@@ -36,7 +36,8 @@ async def run(bot, message):
     temp.USER_STATES.pop(user_id, None)
     
     bots = await db.get_bots(user_id)
-    if not bots: return await message.reply("You haven't added any bots or userbots. These will act as your **Operators**. Please add at least one in `/settings`.")
+    if not bots:
+        return await message.reply("You haven't added any bots or userbots. These will act as your **Operators**. Please add at least one in `/settings`.")
 
     await prompt_target_channel(bot, message)
 
@@ -82,10 +83,12 @@ async def stateful_message_handler(bot: Client, message: Message):
         temp.USER_STATES.pop(user_id, None)
         if error: return await message.reply(error)
         
-        # We need a temporary client just to get the title
         bots = await db.get_bots(user_id)
+        if not bots: return await message.reply("Configuration error: No bots found.")
+
         from_title = "Private Chat"
         try:
+            # Use the first available bot just to get the chat title for the confirmation message
             async with CLIENT.client(bots[0]) as temp_client:
                 from_title = (await temp_client.get_chat(from_chat)).title
         except Exception as e:
@@ -165,7 +168,6 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
         logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
         await query.answer("An error occurred.", show_alert=True)
 
-
 async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
     session = temp.RANGE_SESSIONS.get(session_id)
@@ -178,9 +180,6 @@ async def show_final_confirmation(bot, query, session_id):
     temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
     
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-    
-    # We just use the first operator's name for the display message
-    operator_name = operators[0]['name'] if operators else "N/A"
     
     await bot.send_message(user_id, f"<b>Final Check</b>\n\n"
         f"● <b>Source:</b> `{session['from_title']}`\n"
