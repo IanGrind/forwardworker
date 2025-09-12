@@ -46,16 +46,26 @@ async def pub_(bot, cb: CallbackQuery):
             await m.edit(f"`Step 1/4: Waking up worker {i+1}/{len(worker_configs)}...`")
             worker_clients.append(await start_clone_bot(CLIENT.client(config), config))
         
+        # --- THIS IS THE CORE FIX ---
+        await m.edit("`Step 2/4: Orienting clients (allowing time to sync)...`")
+        await asyncio.sleep(2) # Crucial delay to allow clients to sync their initial state.
+        
         target_chat_id = session['to_chat_id']
         source_chat_id = session['from_chat_id']
 
         await m.edit("`Step 2/4: Verifying channel access...`")
         try:
+            await manager_client.get_chat(target_chat_id)
+        except PeerIdInvalid:
+            return await m.edit(f"**Setup Error:**\nThe Manager Userbot (`{manager_config['name']}`) cannot 'see' the target channel. This usually means it's not a member. Please add it and try again.")
+        
+        try:
             await fetcher_client.get_chat(source_chat_id)
         except PeerIdInvalid:
-             return await m.edit(f"**Setup Error:**\nThe Fetcher Bot/Userbot (`{fetcher_config['name']}`) is not a member of the source channel. Please add it and try again.")
+             return await m.edit(f"**Setup Error:**\nThe Fetcher Bot/Userbot (`{fetcher_config['name']}`) cannot 'see' the source channel. Please ensure it is a member.")
         except Exception as e:
             return await m.edit(f"**Setup Error:**\nCould not access source channel with Fetcher. Error: `{e}`")
+        # --- END OF FIX ---
 
         await m.edit("`Step 3/4: Promoting workers...`")
         worker_privileges = ChatPrivileges(can_post_messages=True, can_edit_messages=True, can_delete_messages=True)
