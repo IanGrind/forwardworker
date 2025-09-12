@@ -39,22 +39,24 @@ class WorkerManager:
 
     async def start(self):
         logger.info(f"WorkerManager started with {len(self.clients)} workers.")
-        while self.job_queue and not self.is_cancelled:
+        # Main loop now correctly waits for workers on cooldown
+        while (self.job_queue or self.cooldown_workers) and not self.is_cancelled:
+            self.check_cooldowns()
+
             if not self.clients:
+                # If no active workers, but some are on cooldown, wait
                 if self.cooldown_workers:
-                    first_cooldown_end = min(self.cooldown_workers.values())
-                    wait_time = max(0, first_cooldown_end - asyncio.get_running_loop().time())
-                    await asyncio.sleep(wait_time)
-                    self.check_cooldowns()
+                    await asyncio.sleep(1)
+                    continue
+                # If no active workers and none on cooldown, the task is done
                 else:
                     break
-                continue
 
             active_client = self.clients.popleft()
 
             try:
                 await self.process_batch(active_client)
-                self.clients.append(active_client)
+                self.clients.append(active_client)  # Return worker to pool on success
                 if self.delay_between_batches > 0 and self.job_queue:
                     await asyncio.sleep(self.delay_between_batches)
             except FloodWait as e:
@@ -62,13 +64,14 @@ class WorkerManager:
                 logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
             except Exception as e:
-                logger.error(f"Worker {active_client.me.first_name} failed with {type(e).__name__}. Cooldown for 10s.")
-                cooldown_duration = 10 # Short cooldown for generic errors
-                self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
-
-            self.check_cooldowns()
+                logger.error(f"Worker {active_client.me.first_name} failed with {type(e).__name__}. Putting on 10s cooldown.")
+                # On any other failure, put the worker on a short cooldown instead of discarding it
+                self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + 10
 
     async def process_batch(self, client):
+        if not self.job_queue:
+            return
+
         message_batch = self.job_queue.popleft()
         try:
             await client.forward_messages(
@@ -78,20 +81,19 @@ class WorkerManager:
             )
             self.sts.add('total_files', len(message_batch))
             self.sts.add('fetched', len(message_batch))
-        except FloodWait as e:
-            self.job_queue.appendleft(message_batch)
-            raise e
         except Exception as e:
+            # If a batch fails, re-queue it and raise the error to trigger cooldown
             self.sts.add('failed', len(message_batch))
             self.sts.add('fetched', len(message_batch))
-            logger.error(f"Failed to process batch: {e}")
-            self.job_queue.appendleft(message_batch) # Re-queue the failed batch
-            raise e # Re-raise the exception to be handled by the start method
+            self.job_queue.appendleft(message_batch)
+            logger.error(f"Failed to process batch, re-queuing. Error: {e}")
+            raise e
 
     def check_cooldowns(self):
         now = asyncio.get_running_loop().time()
         ready_workers = [w for w, end in self.cooldown_workers.items() if now >= end]
         for worker in ready_workers:
+            logger.info(f"Worker {worker.me.first_name} cooldown finished. Returning to active pool.")
             self.clients.append(worker)
             del self.cooldown_workers[worker]
 
@@ -114,7 +116,7 @@ async def resilient_start_clone(config):
 async def pub_(bot, cb: CallbackQuery):
     user_id = cb.from_user.id
     if temp.lock.get(user_id):
-        return await cb.answer("Another task is in progress.", show_alert=True)
+        return await cb.answer("Another task is already in progress.", show_alert=True)
 
     frwd_id = cb.data.split("_")[2]
     session = temp.FORWARD_SESSIONS.get(frwd_id)
@@ -123,48 +125,34 @@ async def pub_(bot, cb: CallbackQuery):
 
     await cb.answer()
     m = await cb.message.edit("`Initializing...`")
-
     operator_clients = []
 
     try:
         operator_configs = await db.get_bots(user_id)
         if not operator_configs:
-            raise ValueError("No Operator Bots/Userbots found.")
+            raise ValueError("No Operator Bots/Userbots found in your settings.")
 
         await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
-
         start_tasks = [resilient_start_clone(config) for config in operator_configs]
         results = await asyncio.gather(*start_tasks)
-
-        successful_clients = []
-        report = ["<b>Operator Startup Report:</b>"]
-        for i, (client, error) in enumerate(results):
-            name = operator_configs[i].get('name', f"#{i+1}")
-            if client:
-                successful_clients.append(client)
-                report.append(f"✅ <code>{name}</code> - <b>Success!</b>")
-            else:
-                report.append(f"❌ <code>{name}</code> - <b>Failed:</b> <code>{error}</code>")
-
-        await m.edit("\n".join(report))
-        await asyncio.sleep(4)
-
-        operator_clients = successful_clients
+        
+        operator_clients = [client for client, error in results if client]
         if not operator_clients:
-            raise ValueError("All operators failed to start.")
+            errors = [error for client, error in results if error]
+            error_summary = ". ".join(set(errors)) if errors else "Unknown reason."
+            raise ValueError(f"All operators failed to start. Common error: {error_summary}")
 
-        await m.edit(f"`Step 2/4: Verifying channel access with {operator_clients[0].me.first_name}...`")
+        await m.edit(f"`Step 2/4: Verifying channel access...`")
         try:
             await operator_clients[0].get_chat(session['from_chat_id'])
             await operator_clients[0].get_chat(session['to_chat_id'])
         except Exception as e:
-            raise ValueError(f"Operator {operator_clients[0].me.first_name} could not access a required chat.\n\nError: {e}")
+            raise ValueError(f"Operator could not access a required chat.\n\n**Error:** `{e}`")
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
 
         await m.edit("`Step 3/4: Populating batch queue...`")
         start_id, end_id = min(sts.start_id, sts.end_id), max(sts.start_id, sts.end_id)
-
         job_queue = deque(
             list(range(i, min(i + BATCH_SIZE, end_id + 1)))
             for i in range(start_id, end_id + 1, BATCH_SIZE)
@@ -174,29 +162,30 @@ async def pub_(bot, cb: CallbackQuery):
         temp.lock[user_id] = True
 
         await m.edit(f"`Step 4/4: Deploying workers...`")
-
+        
         reporter_task = asyncio.create_task(edit_progress(m, sts, sts.get('start')))
-
+        
         user_settings = await db.get_configs(user_id)
         delay = user_settings.get('forward_delay', 0)
         manager = WorkerManager(operator_clients, job_queue, sts, delay)
-
+        
         cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
         await manager.start()
-
-        if not reporter_task.done(): reporter_task.cancel()
-        if not cancel_task.done(): cancel_task.cancel()
-        await asyncio.sleep(0.1)
-        await edit_progress(m, sts, sts.get('start'), done=True)
 
     except Exception as e:
         logger.error(f"Task failed: {e}", exc_info=True)
         await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
     finally:
+        if 'reporter_task' in locals() and not reporter_task.done(): reporter_task.cancel()
+        if 'cancel_task' in locals() and not cancel_task.done(): cancel_task.cancel()
+
+        if 'sts' in locals():
+            await edit_progress(m, sts, sts.get('start'), done=True)
+
         logger.info("Cleaning up resources...")
         stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
-
+        
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
         temp.CANCEL.pop(frwd_id, None)
@@ -313,14 +302,13 @@ async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return await bot.send_message(user_id, "Session expired.")
-
+    
     operators = await db.get_bots(user_id)
     to_title = (await db.get_channel_details(user_id, session['to_chat_id']))['title']
-
+    
     forward_id = generate_short_id()
     temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
-    STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-
+    
     await bot.send_message(user_id, f"<b>Final Check</b>\n\n"
         f"● <b>Source:</b> <code>{session['from_title']}</code>\n"
         f"● <b>Target:</b> <code>{to_title}</code>\n"
@@ -351,7 +339,7 @@ async def settings_query_handler(bot, query):
         parts = query.data.split("#")
         menu, *args = parts[1].split('_', 1)
         value = args[0] if args else None
-
+        
         if menu == "main": await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]]))
         elif menu == "bots": await list_bots(bot, user_id, message=query.message)
         elif menu == "channels": await list_channels(bot, user_id, message=query.message)
@@ -373,7 +361,7 @@ async def forward_delay(client: Client, message: Message):
     if (await db.get_ban_status(user_id))["is_banned"]: return await message.reply_text("Access denied.")
     user_configs = await db.get_configs(user_id)
     delay = user_configs.get('forward_delay', 0)
-    if len(message.command) < 2:
+    if len(message.command) < 2: 
         return await message.reply_text(f"<b>Batch Delay:</b> `{delay}s`\n\nTo change, use `/forwardelay [seconds]`.")
     try:
         new_delay = float(message.command[1])
@@ -383,7 +371,6 @@ async def forward_delay(client: Client, message: Message):
     except ValueError: await message.reply_text("Invalid number.")
     except Exception as e: await message.reply_text(f"Error: {e}")
 
-# CORRECTED: The list of commands to ignore is now properly passed to the filter.
 @Client.on_message(filters.private & filters.incoming & ~filters.command([
     "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"
 ]))
@@ -493,7 +480,7 @@ async def back_to_start(bot, query):
        caption=Translation.START_TXT.format(query.from_user.first_name),
        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Help', callback_data='help'), InlineKeyboardButton('About', callback_data='about')]])
     )
-
+    
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
     await query.message.edit_text(
