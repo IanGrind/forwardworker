@@ -12,13 +12,10 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
-# New helper function to show menus from different contexts
 async def show_settings_menu(bot, message, menu_type):
     user_id = message.chat.id
     if menu_type == 'bots':
         await list_bots(message, user_id, as_new=True)
-    elif menu_type == 'workers':
-        await list_workers(message, user_id, as_new=True)
     elif menu_type == 'channels':
         await list_channels(message, user_id, as_new=True)
 
@@ -46,18 +43,13 @@ async def settings_query(bot, query):
         if menu_type == "main": await query.message.edit_reply_markup(reply_markup=main_buttons())
         elif menu_type == "bots": await list_bots(query.message, user_id)
         elif menu_type == "channels": await list_channels(query.message, user_id)
-        elif menu_type == "workers": await list_workers(query.message, user_id)
         elif menu_type == "addbot": await prompt_for_input(bot, query, user_id, "awaiting_bot_token", "Send the bot token from @BotFather.")
         elif menu_type == "adduserbot": await prompt_for_input(bot, query, user_id, "awaiting_user_session", "Send the Pyrogram (v2) session string.")
         elif menu_type == "addchannel": await prompt_for_input(bot, query, user_id, "awaiting_channel_forward", "Forward a message from the target chat.")
-        elif menu_type == "addworkerbot": await prompt_for_input(bot, query, user_id, "awaiting_worker_bot_token", "Send the worker bot token from @BotFather.")
         elif action == "editbot": await show_bot_details(query.message, user_id, int(value))
         elif action == "removebot": await remove_and_go_back(query.message, user_id, db.remove_bot, int(value), "Bot/Userbot removed.", 'bots')
-        elif action == "setmanager": await set_manager_and_go_back(query, user_id, int(value))
         elif action == "editchannels": await show_channel_details(query.message, user_id, int(value))
         elif action == "removechannel": await remove_and_go_back(query.message, user_id, db.remove_channel, int(value), "Channel removed.", 'channels')
-        elif action == "editworker": await show_worker_details(query.message, user_id, int(value))
-        elif action == "removeworker": await remove_and_go_back(query.message, user_id, db.remove_worker_bot, int(value), "Worker bot removed.", 'workers')
 
     except Exception as e:
         logger.error(f"Error in settings_query: {e}", exc_info=True)
@@ -75,20 +67,12 @@ async def remove_and_go_back(message, user_id, remove_func, item_id, success_tex
     await show_settings_menu(message.bot, message, back_menu)
     await message.delete()
 
-async def set_manager_and_go_back(query, user_id, bot_id):
-    await db.set_manager_userbot(user_id, bot_id)
-    await query.answer("✅ This userbot is now the Manager.", show_alert=True)
-    await list_bots(query.message, user_id)
-
 async def list_bots(message, user_id, as_new=False):
-    manager = await db.get_manager_userbot(user_id)
     buttons = []
     for b in await db.get_bots(user_id):
-        name = b['name']
-        if manager and not b['is_bot'] and manager['id'] == b['id']: name = f"👑 {name} (Manager)"
-        buttons.append([InlineKeyboardButton(name, callback_data=f"settings#editbot_{b['id']}")])
+        buttons.append([InlineKeyboardButton(b['name'], callback_data=f"settings#editbot_{b['id']}")])
     buttons += [[InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot")], [InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
-    text = "<b>֎ Bots & Userbots ֎</b>\n\nThe Manager Userbot (👑) is responsible for adding and promoting worker bots in the target channel."
+    text = "<b>֎ Bots & Userbots ֎</b>\n\nThese are your Operators. All of them will be used to forward messages."
     
     if as_new:
         await message.reply_photo(photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -104,21 +88,10 @@ async def list_channels(message, user_id, as_new=False):
     else:
         await message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-async def list_workers(message, user_id, as_new=False):
-    buttons = [[InlineKeyboardButton(w['name'], callback_data=f"settings#editworker_{w['id']}")] for w in await db.get_worker_bots(user_id)]
-    buttons += [[InlineKeyboardButton('+ Add Worker Bot', callback_data="settings#addworkerbot")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
-    text = "<b>֎ Worker Bots ֎</b>\n\nThese bots will be added to the target channel to perform the forwarding."
-    if as_new:
-        await message.reply_photo(photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
 async def show_bot_details(message, user_id, bot_id):
     _bot = await db.get_bot(user_id, bot_id)
     uname = f"@{_bot['username']}" if _bot.get('username') else "Not Set"
     buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removebot_{bot_id}")], [InlineKeyboardButton('« Back', callback_data="settings#bots")]]
-    if not _bot['is_bot']:
-        buttons.insert(0, [InlineKeyboardButton('👑 Set as Manager', callback_data=f"settings#setmanager_{bot_id}")])
     TEXT = Translation.BOT_DETAILS if _bot['is_bot'] else Translation.USER_DETAILS
     await message.edit_text(TEXT.format(_bot['name'], bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -127,15 +100,7 @@ async def show_channel_details(message, user_id, chat_id):
     buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removechannel_{chat_id}")], [InlineKeyboardButton('« Back', callback_data="settings#channels")]]
     await message.edit_text(f"<b>֎ Channel Details ֎</b>\n\n<b>Title:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat_id}</code>", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def show_worker_details(message, user_id, bot_id):
-    worker = await db.get_worker_bot(user_id, bot_id)
-    uname = f"@{worker.get('username')}" if worker.get('username') else "Not Set"
-    buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removeworker_{bot_id}")], [InlineKeyboardButton('« Back', callback_data="settings#workers")]]
-    await message.edit_text(Translation.BOT_DETAILS.format(worker['name'], bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
-
 def main_buttons():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')],
-        [InlineKeyboardButton('Worker Bots', callback_data='settings#workers')],
-        [InlineKeyboardButton('« Back', callback_data='back')]
+        [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]
     ])
