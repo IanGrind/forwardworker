@@ -218,7 +218,7 @@ async def forward_delay(client: Client, message: Message):
 
 # --- Universal Message Handler for Interactive Sessions ---
 
-@Client.on_message(filters.private & filters.incoming & ~filters.command())
+@Client.on_message(filters.private & filters.incoming & ~filters.command(["start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"]))
 async def universal_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
