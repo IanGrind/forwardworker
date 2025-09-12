@@ -12,7 +12,6 @@ from collections import deque
 from database import db
 from config import Config, temp
 from translation import Translation
-# CORRECTED: Added 'edit_progress' to the import list, which was causing the NameError crash.
 from .utils import update_configs, start_range_selection, update_range_message, STS, edit_progress
 from .test import CLIENT, start_clone_bot
 from pyrogram import Client, filters, enums
@@ -21,18 +20,17 @@ from pyrogram.errors import FloodWait
 
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
-BATCH_SIZE = 100 # Telegram API's limit for forward_messages
-OPERATOR_START_TIMEOUT = 30 # Seconds to wait for a single operator to start
+BATCH_SIZE = 100 
+OPERATOR_START_TIMEOUT = 30
 
 def generate_short_id(length=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 #+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-# CORE FORWARDING ENGINE (BATCH PROCESSING & WORKER MANAGEMENT)
+# CORE FORWARDING ENGINE
 #+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
 
 class WorkerManager:
-    """ Manages a pool of operators for high-speed, ordered batch forwarding. """
     def __init__(self, operator_clients, job_queue, sts, delay):
         self.clients = deque(operator_clients)
         self.job_queue = job_queue
@@ -42,17 +40,15 @@ class WorkerManager:
         self.is_cancelled = False
 
     async def start(self):
-        logger.info(f"WorkerManager started with {len(self.clients)} workers for batch forwarding.")
+        logger.info(f"WorkerManager started with {len(self.clients)} workers.")
         while self.job_queue and not self.is_cancelled:
             if not self.clients:
                 if self.cooldown_workers:
-                    first_worker_cooldown_end = min(self.cooldown_workers.values())
-                    wait_time = max(0, first_worker_cooldown_end - asyncio.get_running_loop().time())
-                    logger.warning(f"All workers in cooldown. Waiting for {wait_time:.2f}s...")
+                    first_cooldown_end = min(self.cooldown_workers.values())
+                    wait_time = max(0, first_cooldown_end - asyncio.get_running_loop().time())
                     await asyncio.sleep(wait_time)
                     self.check_cooldowns()
                 else:
-                    logger.error("No available workers. Halting.")
                     break
                 continue
 
@@ -65,17 +61,14 @@ class WorkerManager:
                     await asyncio.sleep(self.delay_between_batches)
             except FloodWait as e:
                 cooldown_duration = e.value + 5
-                logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
             except Exception:
-                logger.error(f"Worker {active_client.me.first_name} encountered a critical error. Cycling worker.", exc_info=True)
                 self.clients.append(active_client)
             
             self.check_cooldowns()
     
     async def process_batch(self, client):
         message_batch = self.job_queue.popleft()
-        
         try:
             await client.forward_messages(
                 chat_id=self.sts.TO,
@@ -90,14 +83,12 @@ class WorkerManager:
         except Exception as e:
             self.sts.add('failed', len(message_batch))
             self.sts.add('fetched', len(message_batch))
-            logger.error(f"Failed to process batch starting with {message_batch[0]}: {e}")
+            logger.error(f"Failed to process batch: {e}")
 
     def check_cooldowns(self):
         now = asyncio.get_running_loop().time()
-        ready_workers = [worker for worker, end_time in self.cooldown_workers.items() if now >= end_time]
-        
+        ready_workers = [w for w, end in self.cooldown_workers.items() if now >= end]
         for worker in ready_workers:
-            logger.info(f"Worker {worker.me.first_name} cooldown finished. Returning to pool.")
             self.clients.append(worker)
             del self.cooldown_workers[worker]
             
@@ -105,7 +96,6 @@ class WorkerManager:
         self.is_cancelled = True
 
 async def resilient_start_clone(config):
-    """Wrapper to start a clone with a timeout."""
     try:
         client = await asyncio.wait_for(
             start_clone_bot(CLIENT.client(config), config),
@@ -113,8 +103,7 @@ async def resilient_start_clone(config):
         )
         return client, None
     except asyncio.TimeoutError:
-        error_msg = f"Timed out after {OPERATOR_START_TIMEOUT}s"
-        return None, error_msg
+        return None, f"Timed out after {OPERATOR_START_TIMEOUT}s"
     except Exception as e:
         return None, str(e)
 
@@ -122,12 +111,12 @@ async def resilient_start_clone(config):
 async def pub_(bot, cb: CallbackQuery):
     user_id = cb.from_user.id
     if temp.lock.get(user_id):
-        return await cb.answer("Another task is already in progress.", show_alert=True)
+        return await cb.answer("Another task is in progress.", show_alert=True)
 
     frwd_id = cb.data.split("_")[2]
     session = temp.FORWARD_SESSIONS.get(frwd_id)
     if not session:
-        return await cb.message.edit("This task has expired or is invalid.")
+        return await cb.message.edit("This task has expired.")
 
     await cb.answer()
     m = await cb.message.edit("`Initializing...`")
@@ -137,32 +126,29 @@ async def pub_(bot, cb: CallbackQuery):
     try:
         operator_configs = await db.get_bots(user_id)
         if not operator_configs:
-            raise ValueError("No Operator Bots/Userbots found in your settings.")
+            raise ValueError("No Operator Bots/Userbots found.")
         
-        user_settings = await db.get_configs(user_id)
-        delay = user_settings.get('forward_delay', 0)
-        
-        await m.edit(f"`Step 1/4: Concurrently starting {len(operator_configs)} operator(s) with a {OPERATOR_START_TIMEOUT}s timeout...`")
+        await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
         
         start_tasks = [resilient_start_clone(config) for config in operator_configs]
         results = await asyncio.gather(*start_tasks)
         
         successful_clients = []
-        report_lines = ["<b>Operator Startup Report:</b>"]
+        report = ["<b>Operator Startup Report:</b>"]
         for i, (client, error) in enumerate(results):
-            bot_name = operator_configs[i].get('name', f"Operator #{i+1}")
+            name = operator_configs[i].get('name', f"#{i+1}")
             if client:
                 successful_clients.append(client)
-                report_lines.append(f"✅ <code>{bot_name}</code> - <b>Success!</b>")
+                report.append(f"✅ <code>{name}</code> - <b>Success!</b>")
             else:
-                report_lines.append(f"❌ <code>{bot_name}</code> - <b>Failed:</b> <code>{error}</code>")
+                report.append(f"❌ <code>{name}</code> - <b>Failed:</b> <code>{error}</code>")
         
-        await m.edit("\n".join(report_lines))
+        await m.edit("\n".join(report))
         await asyncio.sleep(4)
 
         operator_clients = successful_clients
         if not operator_clients:
-            raise ValueError("All operators failed to start. Please check your tokens/sessions in settings and try again.")
+            raise ValueError("All operators failed to start.")
 
         await m.edit(f"`Step 2/4: Verifying channel access with {operator_clients[0].me.first_name}...`")
         try:
@@ -173,21 +159,23 @@ async def pub_(bot, cb: CallbackQuery):
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
         
-        await m.edit("`Step 3/4: Populating ordered batch queue...`")
-        start_id = min(sts.start_id, sts.end_id)
-        end_id = max(sts.start_id, sts.end_id)
+        await m.edit("`Step 3/4: Populating batch queue...`")
+        start_id, end_id = min(sts.start_id, sts.end_id), max(sts.start_id, sts.end_id)
         
-        job_queue = deque()
-        for i in range(start_id, end_id + 1, BATCH_SIZE):
-            job_queue.append(list(range(i, min(i + BATCH_SIZE, end_id + 1))))
+        job_queue = deque(
+            list(range(i, min(i + BATCH_SIZE, end_id + 1)))
+            for i in range(start_id, end_id + 1, BATCH_SIZE)
+        )
         
         temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m}}
         temp.lock[user_id] = True
 
-        await m.edit(f"`Step 4/4: Deploying workers...`\n\n`{sts.total}` msgs in `{len(job_queue)}` batches.\n`{len(operator_clients)}` workers active.\nForwarding from **{session['from_title']}**...")
+        await m.edit(f"`Step 4/4: Deploying workers...`")
         
         reporter_task = asyncio.create_task(edit_progress(m, sts, sts.get('start')))
         
+        user_settings = await db.get_configs(user_id)
+        delay = user_settings.get('forward_delay', 0)
         manager = WorkerManager(operator_clients, job_queue, sts, delay)
         
         cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
@@ -195,14 +183,14 @@ async def pub_(bot, cb: CallbackQuery):
 
         if not reporter_task.done(): reporter_task.cancel()
         if not cancel_task.done(): cancel_task.cancel()
-        await asyncio.sleep(0.1) 
+        await asyncio.sleep(0.1)
         await edit_progress(m, sts, sts.get('start'), done=True)
 
     except Exception as e:
-        logger.error(f"A critical error occurred, halting task: {e}", exc_info=True)
+        logger.error(f"Task failed: {e}", exc_info=True)
         await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
     finally:
-        logger.info("Cleaning up forwarding task resources...")
+        logger.info("Cleaning up resources...")
         stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         
@@ -210,7 +198,7 @@ async def pub_(bot, cb: CallbackQuery):
         temp.ACTIVE_TASKS.pop(user_id, None)
         temp.CANCEL.pop(frwd_id, None)
         temp.lock.pop(user_id, None)
-        logger.info("Forwarding task fully cleaned up.")
+        logger.info("Cleanup complete.")
 
 async def cancel_checker(frwd_id, manager):
     while not manager.is_cancelled:
@@ -222,7 +210,6 @@ async def cancel_checker(frwd_id, manager):
 #+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
 # USER COMMANDS & INTERFACE HANDLERS
 #+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-
 @Client.on_message(filters.private & filters.command(['start']))
 async def start(client, message):
     user = message.from_user
@@ -231,7 +218,6 @@ async def start(client, message):
             await db.add_user(user.id, user.first_name)
     except Exception as e:
         logger.error(f"Error in user registration: {e}", exc_info=True)
-
     await message.reply_photo(
         photo=random.choice(SYD),
         caption=Translation.START_TXT.format(user.mention),
@@ -249,133 +235,105 @@ async def restart(client, message):
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 def parse_message_input(message):
-    if not message or (not message.text and not message.forward_date): return None, None, "Invalid input: Send a message link or forward a message."
     if message.text and not message.forward_date:
         match = re.match(r"(https://)?t\.me/(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)", message.text.replace("?single", ""))
-        if not match: return None, None, 'Invalid Link Format.'
-        chat_id = f"-100{match.group(3)}" if match.group(3).isdigit() else match.group(3)
-        return chat_id, int(match.group(4)), None
-    elif message.forward_from_chat: return message.forward_from_chat.id, message.forward_from_message_id, None
-    return None, None, "Could not identify the source."
+        if match:
+            chat_id = f"-100{match.group(3)}" if match.group(3).isdigit() else match.group(3)
+            return chat_id, int(match.group(4)), None
+    elif message.forward_from_chat:
+        return message.forward_from_chat.id, message.forward_from_message_id, None
+    return None, None, "Invalid input. Send a message link or forward a message."
 
 @Client.on_message(filters.private & filters.command(["fwd", "forward"]))
 async def forward_command_handler(bot, message):
     user_id = message.from_user.id
     if temp.lock.get(user_id): return await message.reply("A task is in progress.")
-    
-    bots = await db.get_bots(user_id)
-    if not bots: return await message.reply("You haven't added any bots or userbots. Please add at least one in `/settings`.")
-
-    channels = await db.get_user_channels(user_id)
-    if not channels: return await message.reply("You haven't added any target channels. Please add one in `/settings`.")
+    if not await db.get_bots(user_id): return await message.reply("No bots found. Add one in `/settings`.")
+    if not await db.get_user_channels(user_id): return await message.reply("No target channels found. Add one in `/settings`.")
 
     temp.USER_STATES[user_id] = {'command_message': message, 'is_settings': False}
-    
-    buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in channels]
+    buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in await db.get_user_channels(user_id)]
     buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-    await message.reply("<b>Step 1: Select the Target Channel</b>", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply("<b>Step 1: Select Target Channel</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^fwd_target_'))
 async def cb_select_target(bot, query):
     user_id = query.from_user.id
     state = temp.USER_STATES.get(user_id)
-    if not state or state.get("is_settings"): return await query.answer("This is not for you, or your session has expired.", show_alert=True)
-    
+    if not state or state.get("is_settings"): return await query.answer("Session expired.", show_alert=True)
     state['to_chat_id'] = int(query.data.split('_')[-1])
-    
     prompt = await query.message.edit_text(Translation.FROM_MSG)
-    state['prompt_message_id'] = prompt.id
-    state['state'] = 'awaiting_source'
+    state.update({'prompt_message_id': prompt.id, 'state': 'awaiting_source'})
 
 @Client.on_callback_query(filters.regex(r"^(range_|noop)"))
 async def range_menu_handler(bot: Client, query: CallbackQuery):
     user_id = query.from_user.id
     if query.data == "noop": return await query.answer()
-
     try:
         parts = query.data.split('_')
-        action = parts[1]
-        session_id = parts[-1]
-
+        action, session_id = parts[1], parts[-1]
         session = temp.RANGE_SESSIONS.get(session_id)
-        if not session or session.get('user_id') != user_id:
-            return await query.answer("This menu is not for you, or the session has expired.", show_alert=True)
+        if not session or session.get('user_id') != user_id: return await query.answer("Session expired.", show_alert=True)
 
         if action == "confirm":
             await query.message.delete()
             await show_final_confirmation(bot, query, session_id)
-
         elif action == "all":
-            await query.answer("Checking for the last message...", show_alert=False)
+            await query.answer("Finding last message...", show_alert=False)
             bots = await db.get_bots(user_id)
-            if not bots:
-                return await query.answer("No operator bots found to perform this action.", show_alert=True)
-            
+            if not bots: return await query.answer("No bots to perform this action.", show_alert=True)
             try:
                 async with CLIENT.client(bots[0]) as temp_client:
                     async for last_message in temp_client.get_chat_history(session['from_chat_id'], limit=1):
-                        session['start_id'] = 1
-                        session['end_id'] = last_message.id
+                        session.update({'start_id': 1, 'end_id': last_message.id})
                         await update_range_message(bot, session_id, message_to_edit=query.message)
-                        return await query.answer(f"Range set to: 1 -> {last_message.id}", show_alert=False)
-                await query.answer("Could not find any messages in the source chat.", show_alert=True)
+                        return await query.answer(f"Range set: 1 -> {last_message.id}")
+                await query.answer("No messages found.", show_alert=True)
             except Exception as e:
-                logger.error(f"Could not get last message for 'Forward All': {e}")
-                await query.answer(f"Error: Could not access the source chat. Is the operator bot a member?\n\n({e})", show_alert=True)
-
+                await query.answer(f"Error: {e}", show_alert=True)
         elif action == "cancel":
             temp.RANGE_SESSIONS.pop(session_id, None)
             await query.message.delete()
-            await bot.send_message(user_id, "Operation cancelled.")
-
+            await bot.send_message(user_id, "Cancelled.")
         elif action == "edit":
-            part_to_edit = "start" if parts[2] == "start" else "end"
-            prompt_text = f"OK, send the new **{part_to_edit}** message ID."
-            prompt_msg = await query.message.edit_text(prompt_text)
-            temp.USER_STATES[user_id] = { "state": "awaiting_range_edit", "session_id": session_id, "part_to_edit": part_to_edit, "prompt_message_id": prompt_msg.id, "is_settings": False }
-        
+            part = "start" if parts[2] == "start" else "end"
+            prompt = await query.message.edit_text(f"Send the new **{part}** message ID.")
+            temp.USER_STATES[user_id] = {"state": "awaiting_range_edit", "session_id": session_id, "part_to_edit": part, "prompt_message_id": prompt.id}
         elif action == "swap":
-            start, end = session['start_id'], session['end_id']
-            session['start_id'] = end
-            session['end_id'] = start
+            session['start_id'], session['end_id'] = session['end_id'], session['start_id']
             await update_range_message(bot, session_id, message_to_edit=query.message)
-            await query.answer("Order swapped")
-            
+            await query.answer("Swapped.")
     except Exception as e:
-        logger.error(f"Error in range_menu_handler: {e}", exc_info=True)
-        await query.answer("An error occurred.", show_alert=True)
+        await query.answer(f"Error: {e}", show_alert=True)
 
 async def show_final_confirmation(bot, query, session_id):
     user_id = query.from_user.id
     session = temp.RANGE_SESSIONS.get(session_id)
-    if not session: return await bot.send_message(user_id, "⚠️ Your session has expired.")
+    if not session: return await bot.send_message(user_id, "Session expired.")
     
     operators = await db.get_bots(user_id)
     to_title = (await db.get_channel_details(user_id, session['to_chat_id']))['title']
     
     forward_id = generate_short_id()
     temp.FORWARD_SESSIONS[forward_id] = temp.RANGE_SESSIONS.pop(session_id)
-    
     STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
     
     await bot.send_message(user_id, f"<b>Final Check</b>\n\n"
         f"● <b>Source:</b> `{session['from_title']}`\n"
         f"● <b>Target:</b> `{to_title}`\n"
         f"● <b>Range:</b> `{min(session['start_id'], session['end_id'])}` to `{max(session['start_id'], session['end_id'])}`\n"
-        f"● <b>Operators:</b> `{len(operators)}` bots/userbots will be used.\n\n"
-        f"<i>Ensure all Operators are members of the source channel and admins in the target channel.</i>",
+        f"● <b>Operators:</b> `{len(operators)}` will be used.\n\n"
+        f"<i>Ensure operators are in both channels!</i>",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}")],
-            [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
+            [InlineKeyboardButton('✓ Start Forwarding', callback_data=f"start_public_{forward_id}")],
+            [InlineKeyboardButton('« Cancel', callback_data="close_btn")]
         ]))
 
 @Client.on_message(filters.private & filters.command(['settings']))
 async def settings_entry(client, message):
-    if temp.lock.get(message.from_user.id):
-        return await message.reply("A task is in progress.")
+    if temp.lock.get(message.from_user.id): return await message.reply("A task is in progress.")
     await message.reply_photo(
-        photo=random.choice(SYD),
-        caption="<b>֎ Settings ֎</b>",
+        photo=random.choice(SYD), caption="<b>֎ Settings ֎</b>",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]
         ])
@@ -386,77 +344,57 @@ async def settings_query_handler(bot, query):
     await query.answer()
     user_id = query.from_user.id
     if temp.lock.get(user_id): return await query.answer("A task is in progress.", show_alert=True)
-
     try:
         parts = query.data.split("#")
-        menu_type = parts[1]
-        action_parts = menu_type.split('_', 1)
-        action = action_parts[0]
-        value = action_parts[1] if len(action_parts) > 1 else None
-
-        if menu_type == "main":
-            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]
-            ]))
-        elif menu_type == "bots": await list_bots(bot, user_id, message=query.message)
-        elif menu_type == "channels": await list_channels(bot, user_id, message=query.message)
-        elif menu_type == "addbot": await prompt_for_input(bot, query, user_id, "awaiting_bot_token", "Send the bot token from @BotFather.")
-        elif menu_type == "adduserbot": await prompt_for_input(bot, query, user_id, "awaiting_user_session", "Send the Pyrogram (v2) session string.")
-        elif menu_type == "addbots_bulk": await prompt_for_input(bot, query, user_id, "awaiting_bots_bulk", "Send a list of bot tokens, separated by spaces.")
-        elif menu_type == "addusers_bulk": await prompt_for_input(bot, query, user_id, "awaiting_users_bulk", "Send a list of session strings, separated by spaces.")
-        elif menu_type == "addchannel": await prompt_for_input(bot, query, user_id, "awaiting_channel_forward", "Forward a message from the target chat.")
-        elif action == "editbot": await show_bot_details(query.message, user_id, int(value))
-        elif action == "removebot": await remove_and_go_back(bot, query, user_id, db.remove_bot, int(value), "Bot/Userbot removed.", 'bots')
-        elif action == "editchannels": await show_channel_details(query.message, user_id, int(value))
-        elif action == "removechannel": await remove_and_go_back(bot, query, user_id, db.remove_channel, int(value), "Channel removed.", 'channels')
-
+        menu, *args = parts[1].split('_', 1)
+        value = args[0] if args else None
+        
+        if menu == "main": await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]]))
+        elif menu == "bots": await list_bots(bot, user_id, message=query.message)
+        elif menu == "channels": await list_channels(bot, user_id, message=query.message)
+        elif menu == "addbot": await prompt_for_input(bot, query, user_id, "awaiting_bot_token", "Send the bot token.")
+        elif menu == "adduserbot": await prompt_for_input(bot, query, user_id, "awaiting_user_session", "Send the session string.")
+        elif menu == "addbots": await prompt_for_input(bot, query, user_id, "awaiting_bots_bulk", "Send a list of bot tokens, separated by spaces.")
+        elif menu == "addusers": await prompt_for_input(bot, query, user_id, "awaiting_users_bulk", "Send a list of session strings, separated by spaces.")
+        elif menu == "addchannel": await prompt_for_input(bot, query, user_id, "awaiting_channel_forward", "Forward a message from the target chat.")
+        elif menu == "editbot": await show_bot_details(query.message, user_id, int(value))
+        elif menu == "removebot": await remove_and_go_back(bot, query, user_id, db.remove_bot, int(value), "Bot removed.", 'bots')
+        elif menu == "editchannels": await show_channel_details(query.message, user_id, int(value))
+        elif menu == "removechannel": await remove_and_go_back(bot, query, user_id, db.remove_channel, int(value), "Channel removed.", 'channels')
     except Exception as e:
-        logger.error(f"Error in settings_query: {e}", exc_info=True)
+        logger.error(f"Error in settings: {e}", exc_info=True)
 
 @Client.on_message(filters.private & filters.command(["forwardelay", "fd"]))
 async def forward_delay(client: Client, message: Message):
     user_id = message.from_user.id
-    
-    ban_status = await db.get_ban_status(user_id)
-    if ban_status["is_banned"]: return await message.reply_text(f"Access denied.")
-
+    if (await db.get_ban_status(user_id))["is_banned"]: return await message.reply_text("Access denied.")
     user_configs = await db.get_configs(user_id)
-    current_delay = user_configs.get('forward_delay', 0)
-
+    delay = user_configs.get('forward_delay', 0)
     if len(message.command) < 2: 
-        await message.reply_text(
-            f"<b>֎ Batch Delay ֎</b>\n\n"
-            f"Set a custom delay between batches of 100 messages.\n\n"
-            f"<b>Current Delay:</b> <code>{current_delay} seconds</code>\n\n"
-            f"<b>Usage:</b> `/forwardelay [seconds]` (e.g., `/forwardelay 0.5`)\n\n"
-            f"Set to `0` for maximum speed."
-        )
-        return
-    
+        return await message.reply_text(f"<b>Batch Delay:</b> `{delay}s`\n\nTo change, use `/forwardelay [seconds]`.")
     try:
-        delay = float(message.command[1])
-        if delay < 0: return await message.reply_text("The delay must be a positive number.")
-        await update_configs(user_id, 'forward_delay', delay)
-        await message.reply_text(f"✅ Delay between batches has been updated to **{delay} seconds**.")
-    except ValueError: await message.reply_text("Invalid input. Please provide a number.")
-    except Exception as e: await message.reply_text(f"An error occurred: {e}")
+        new_delay = float(message.command[1])
+        if new_delay < 0: return await message.reply_text("Delay must be a positive number.")
+        await update_configs(user_id, 'forward_delay', new_delay)
+        await message.reply_text(f"Batch delay updated to **{new_delay}s**.")
+    except ValueError: await message.reply_text("Invalid number.")
+    except Exception as e: await message.reply_text(f"Error: {e}")
 
-@Client.on_message(filters.private & filters.incoming & ~filters.command([
-    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"
-]))
+@Client.on_message(filters.private & filters.incoming & ~filters.command())
 async def universal_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
     if not state: return
 
-    if state.get("is_settings"):
-        if state.get("prompt_message_id"):
-            try: await bot.delete_messages(user_id, state["prompt_message_id"])
-            except: pass
-        
-        state_type = state.get("state")
-        temp.USER_STATES.pop(user_id, None)
+    prompt_id = state.get("prompt_message_id")
+    if prompt_id:
+        try: await bot.delete_messages(user_id, prompt_id)
+        except: pass
 
+    state_type = state.get("state")
+    temp.USER_STATES.pop(user_id, None)
+
+    if state_type in ["awaiting_bot_token", "awaiting_user_session", "awaiting_bots_bulk", "awaiting_users_bulk", "awaiting_channel_forward"]:
         if state_type == "awaiting_bot_token":
             if await CLIENT.add_bot(message): await list_bots(bot, user_id, as_new=True, message=message)
         elif state_type == "awaiting_user_session":
@@ -471,64 +409,32 @@ async def universal_message_handler(bot: Client, message: Message):
                 await message.reply("✅ Channel added.")
                 await list_channels(bot, user_id, as_new=True, message=message)
             else:
-                await message.reply("That was not a valid forwarded message.")
-                await list_channels(bot, user_id, as_new=True, message=message)
-    
-    elif state.get('state') == 'awaiting_source':
-        if state.get("prompt_message_id"):
-            try: await bot.delete_messages(user_id, state["prompt_message_id"])
-            except: pass
-        
+                await message.reply("Not a valid forwarded message.")
+    elif state_type == 'awaiting_source':
         from_chat, end_id, error = parse_message_input(message)
-        if error:
-            temp.USER_STATES.pop(user_id, None)
-            return await message.reply(error)
-
-        to_chat_id = state.get('to_chat_id')
-        command_message = state.get('command_message')
-        temp.USER_STATES.pop(user_id, None)
-
+        if error: return await message.reply(error)
+        to_chat_id = state['to_chat_id']
         bots = await db.get_bots(user_id)
         from_title = "Private Chat"
         try:
-            # Use a running client if available
-            if temp.OPERATOR_CLIENTS:
-                first_client = next(iter(temp.OPERATOR_CLIENTS.values()))
-                from_title = (await first_client.get_chat(from_chat)).title
-            else:
-                 async with CLIENT.client(bots[0]) as temp_client:
-                    from_title = (await temp_client.get_chat(from_chat)).title
+            async with CLIENT.client(bots[0]) as temp_client:
+                from_title = (await temp_client.get_chat(from_chat)).title
         except Exception as e:
-            logger.warning(f"Could not get chat title with first bot: {e}")
-        
-        await start_range_selection(bot, command_message, from_chat, from_title, to_chat_id, 1, end_id)
-        
-    elif state.get('state') == 'awaiting_range_edit':
-        session_id = state.get("session_id")
+            logger.warning(f"Could not get chat title: {e}")
+        await start_range_selection(bot, state['command_message'], from_chat, from_title, to_chat_id, 1, end_id)
+    elif state_type == 'awaiting_range_edit':
+        session_id = state["session_id"]
         session = temp.RANGE_SESSIONS.get(session_id)
-        if not session: 
-            temp.USER_STATES.pop(user_id, None)
-            return await message.reply_text("Your session has expired.")
-        
+        if not session: return await message.reply_text("Session expired.")
         try:
             new_id = int(message.text)
-            part_to_edit = state.get("part_to_edit")
-            session[f'{part_to_edit}_id'] = new_id
-            
+            session[f'{state["part_to_edit"]}_id'] = new_id
             await message.delete()
-            if state.get("prompt_message_id"):
-                await bot.delete_messages(user_id, state["prompt_message_id"])
-
-            temp.USER_STATES.pop(user_id, None)
             await update_range_message(bot, session_id)
-        except ValueError:
-            await message.reply_text("That's not a valid message ID.")
-        except Exception as e:
-            logger.error(f"Error processing range edit: {e}", exc_info=True)
+        except ValueError: await message.reply_text("Not a valid ID.")
 
 async def prompt_for_input(bot, query, user_id, state, text):
-    await query.message.delete()
-    prompt = await bot.send_message(user_id, f"{text}\n\n/cancel - to abort.")
+    prompt = await query.message.edit_text(f"{text}\n\n/cancel - to abort.")
     temp.USER_STATES[user_id] = {"state": state, "prompt_message_id": prompt.id, "is_settings": True}
 
 async def remove_and_go_back(bot, query, user_id, remove_func, item_id, success_text, back_menu):
@@ -542,27 +448,25 @@ async def list_bots(bot, user_id, message=None, as_new=False):
     bots = await db.get_bots(user_id)
     buttons = [[InlineKeyboardButton(b['name'], callback_data=f"settings#editbot_{b['id']}")] for b in bots]
     buttons.extend([
-        [InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"), InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")],
-        [InlineKeyboardButton('+ Add Multiple Bots', callback_data="settings#addbots_bulk"), InlineKeyboardButton('+ Add Multiple Userbots', callback_data="settings#addusers_bulk")],
+        [InlineKeyboardButton('+ Add', callback_data="settings#addbot"), InlineKeyboardButton('+ Add User', callback_data="settings#adduserbot")],
+        [InlineKeyboardButton('+ Add Many', callback_data="settings#addbots_bulk"), InlineKeyboardButton('+ Add Many Users', callback_data="settings#addusers_bulk")],
         [InlineKeyboardButton('« Back', callback_data="settings#main")]
     ])
     text = f"<b>֎ Bots & Userbots ({len(bots)}) ֎</b>"
-    
-    if as_new and message: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-    elif message: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
+    if as_new: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
+    else: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def list_channels(bot, user_id, message=None, as_new=False):
     channels = await db.get_user_channels(user_id)
     buttons = [[InlineKeyboardButton(f"● {c['title']}", callback_data=f"settings#editchannels_{c['chat_id']}")] for c in channels]
     buttons += [[InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
     text = f"<b>֎ Target Channels ({len(channels)}) ֎</b>"
-
-    if as_new and message: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-    elif message: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
+    if as_new: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
+    else: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def show_bot_details(message, user_id, bot_id):
     _bot = await db.get_bot(user_id, bot_id)
-    uname = f"@{_bot['username']}" if _bot.get('username') else "Not Set"
+    uname = f"@{_bot['username']}" if _bot.get('username') else "N/A"
     buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removebot_{bot_id}")], [InlineKeyboardButton('« Back', callback_data="settings#bots")]]
     TEXT = Translation.BOT_DETAILS if _bot['is_bot'] else Translation.USER_DETAILS
     await message.edit_caption(caption=TEXT.format(_bot['name'], bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
@@ -570,56 +474,27 @@ async def show_bot_details(message, user_id, bot_id):
 async def show_channel_details(message, user_id, chat_id):
     chat = await db.get_channel_details(user_id, int(chat_id))
     buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removechannel_{chat_id}")], [InlineKeyboardButton('« Back', callback_data="settings#channels")]]
-    await message.edit_caption(caption=f"<b>֎ Channel Details ֎</b>\n\n<b>Title:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.edit_caption(caption=f"<b>Channel:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
-    temp.USER_STATES.pop(query.from_user.id, None)
     await query.message.delete()
+    temp.USER_STATES.pop(query.from_user.id, None)
 
 @Client.on_callback_query(filters.regex(r'^back'))
 async def back_to_start(bot, query):
     await query.message.edit_caption(
        caption=Translation.START_TXT.format(query.from_user.first_name),
-       reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton('Help', callback_data='help'),
-            InlineKeyboardButton('About', callback_data='about')
-       ]])
+       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Help', callback_data='help'), InlineKeyboardButton('About', callback_data='about')]])
     )
     
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
     await query.message.edit_text(
         text=Translation.HELP_TXT,
-        reply_markup=InlineKeyboardMarkup(
-            [[
-            InlineKeyboardButton('How to Use', callback_data='how_to_use')
-            ],[
-            InlineKeyboardButton('Settings', callback_data='settings#main'),
-            InlineKeyboardButton('Stats', callback_data='status')
-            ],[
-            InlineKeyboardButton('Active Tasks', callback_data='active_tasks_cmd'),
-            InlineKeyboardButton('« Back', callback_data='back')
-            ]]
-        ))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Settings', callback_data='settings#main'), InlineKeyboardButton('« Back', callback_data='back')]])
+    )
 
 @Client.on_callback_query(filters.regex(r'^about'))
 async def about(bot, query):
-    await query.message.edit_caption(
-        caption=Translation.ABOUT_TXT.format(bot.me.mention),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='back')]]),
-    )
-
-@Client.on_callback_query(filters.regex(r'^how_to_use'))
-async def how_to_use(bot, query):
-    await query.message.edit_caption(
-        caption=Translation.HOW_USE_TXT,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='help')]]),
-    )
-
-@Client.on_callback_query(filters.regex(r'^status'))
-async def status(bot, query):
-    await query.message.edit_caption(
-        caption="Bot is online and operational.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='help')]]),
-    )
+    await query.message.edit_caption(caption=Translation.ABOUT_TXT.format(bot.me.mention), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='back')]]))
