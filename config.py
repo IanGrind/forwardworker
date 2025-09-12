@@ -1,4 +1,4 @@
-importimport os
+import os
 
 class Config:
     API_ID = os.environ.get("API_ID", "")
