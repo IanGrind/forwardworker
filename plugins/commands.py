@@ -68,6 +68,8 @@ async def restart(client, message):
     await asyncio.sleep(2)
     await msg.edit("<i>Restarted.</i>")
     os.execl(sys.executable, sys.executable, *sys.argv)
+
+# THE CONFLICTING FORWARDELAY HANDLER HAS BEEN REMOVED FROM THIS FILE.
     
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
