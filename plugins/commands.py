@@ -15,6 +15,12 @@ main_buttons = [[
         InlineKeyboardButton('About', callback_data='about')
 ]]
 
+async def update_configs(user_id, key, value):
+    """Helper function to update a specific config key."""
+    configs = await db.get_configs(user_id)
+    configs[key] = value
+    await db.update_configs(user_id, configs)
+
 @Client.on_message(filters.private & filters.command(['start']))
 async def start(client, message):
     user = message.from_user
@@ -48,8 +54,8 @@ async def reset_user(client, message):
 async def confirm_reset_callback(bot, query):
     user_id = query.from_user.id
     try:
-        # Assuming a db function for a comprehensive reset
-        # await db.reset_user_data(user_id) 
+        # A more comprehensive reset function might be needed in `database.py`
+        # For now, this provides feedback.
         await query.message.edit_text("✓ **Account has been reset.**\n\nYour settings have been cleared.\n\nUse /start to begin again.")
     except Exception as e:
         await query.message.edit_text(f"An error occurred during reset: `{e}`")
@@ -60,6 +66,32 @@ async def restart(client, message):
     await asyncio.sleep(2)
     await msg.edit("<i>Restarted.</i>")
     os.execl(sys.executable, sys.executable, *sys.argv)
+
+@Client.on_message(filters.private & filters.command(["forwardelay", "fd"]))
+async def forward_delay(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    ban_status = await db.get_ban_status(user_id)
+    if ban_status["is_banned"]:
+        return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
+
+    user_configs = await db.get_configs(user_id)
+    current_delay = user_configs.get('forward_delay', 0.5)
+
+    if len(message.command) < 2:
+        return await message.reply_text(Translation.FORWARDELAY_TXT.format(current_delay=current_delay))
+    
+    try:
+        delay = float(message.command[1])
+        if delay < 0:
+            return await message.reply_text("The delay must be a positive number.")
+        
+        await update_configs(user_id, 'forward_delay', delay)
+        await message.reply_text(f"✅ Forwarding delay has been updated to **{delay} seconds**.")
+    except ValueError:
+        await message.reply_text("Invalid input. Please provide a number (e.g., `0.5`, `1`, `2`).")
+    except Exception as e:
+        await message.reply_text(f"An error occurred: {e}")
     
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
