@@ -1,3 +1,5 @@
+# iangrind/forwardworker/forwardworker-1ff680b8c32922eb74e103a193e108a8d299c7bc/bot.py
+
 import asyncio
 import logging 
 import logging.config
@@ -5,7 +7,6 @@ from config import Config, temp
 from database import db
 from aiohttp import web
 from plugins import web_server
-from operators import start_operators, stop_operators # <-- NEW IMPORT
 from pyrogram import Client, __version__, idle
 from pyrogram.raw.all import layer 
 from pyrogram.enums import ParseMode
@@ -31,14 +32,17 @@ class Bot(Client):
         self.log = logging
 
     async def start(self):
-        await super().start()
+        try:
+            await super().start()
+        except FloodWait as e:
+            self.log.warning(f"FloodWait on start: waiting for {e.value} seconds.")
+            await asyncio.sleep(e.value)
+            await super().start()
+            
         me = await self.get_me()
-        logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started.")
+        logging.info(f"{me.first_name} with Pyrogram v{__version__} (Layer {layer}) started on @{me.username}.")
         
         temp.BANNED_USERS = await db.get_banned()
-
-        # NEW: Start all operator bots ONCE and keep them running
-        await start_operators()
 
         # Start the web server
         app = web.AppRunner(await web_server())
@@ -49,7 +53,5 @@ class Bot(Client):
         await idle()
 
     async def stop(self, *args):
-        # NEW: Gracefully stop all running operators
-        await stop_operators()
         await super().stop()
         logging.info("Bot has stopped.")
