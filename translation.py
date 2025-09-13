@@ -1,4 +1,3 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/translation.py
 import os
 from config import Config
 
@@ -17,9 +16,7 @@ Available commands:
 
 ● /start - Check if alive.
 ● /forward - Forward a range of messages.
-● /unequify - Remove duplicates from a chat.
 ● /tasks - View and manage active tasks.
-● /ubclist - List all userbot chats.
 ● /settings - Open the configuration menu.
 ● /resetme - A fresh start. Wipes all settings.
 ● /forwardelay - Set a custom forward delay.
@@ -28,7 +25,9 @@ Available commands:
 ▸ Custom message ranges.
 ▸ Interactive chat selection.
 ▸ Forwards from public & private channels.
+▸ Control over forward tag.
 ▸ Custom captions & buttons.
+▸ Message type filtering.
 ▸ Skips duplicates automatically.
 ▸ High-speed concurrent forwarding with adjustable delay.
 """
@@ -102,19 +101,6 @@ Manual input: `/unequify [channel_username_or_id]`"""
 <b>Progress:</b> <code>{percentage}%</code>
 <b>ETA:</b> <code>{eta}</code>
 """
-
-  # --- Corrected Status Alerts (Concise for Telegram's 200 character popup limit) ---
-
-  STATUS_ALERT = """Processed: {fetched}/{total} ({percentage}%)
-Forwarded: {forwarded} | Failed: {failed}
-Skipped: {skipped} | Status: {status}
-ETA: {eta}"""
-  
-  UNEQUIFY_STATUS_ALERT = """Scanned: {scanned}/{total} ({percentage}%)
-Deleted: {deleted} | Status: {status}
-ETA: {eta}"""
-  
-  # --------------------------------------------------------------------------
   
   DOUBLE_CHECK = """<b>֎ Final Check ֎</b>
 
@@ -138,4 +124,4 @@ Set a custom delay between forwards. Helps avoid API limits.
 <b>Usage:</b> `/forwardelay [seconds]`
 <b>Example:</b> `/forwardelay 0.5`
 
-Default is 0.5 seconds in high-speed mode."""
+Default is 0.5 seconds."""
