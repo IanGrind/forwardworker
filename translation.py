@@ -18,6 +18,7 @@ Available commands:
 ● /forward - Forward a range of messages.
 ● /tasks - View and manage active tasks.
 ● /settings - Open the configuration menu.
+● /diagnose - Check bot permissions for a chat.
 ● /forwardelay - Set a custom forward delay (in seconds).
 
 <b>Features:</b>
@@ -96,4 +97,3 @@ Set a custom delay (in seconds) between each message forward. This can help prev
 
 <b>Usage:</b> `/forwardelay [seconds]`
 <b>Example:</b> `/forwardelay 0.5`"""
-
