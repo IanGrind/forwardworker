@@ -10,90 +10,137 @@ from collections import deque
 from database import db
 from config import Config, temp
 from translation import Translation
-from .utils import update_configs, start_range_selection, update_range_message, STS, edit_progress
+from .utils import start_range_selection, update_range_message, STS, edit_progress, get_size, progress_message_content
+from .parser import parse_buttons
 from .test import CLIENT, start_clone_bot
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, MessageNotModified
 
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
-BATCH_SIZE = 100
+BATCH_SIZE = 100 
 OPERATOR_START_TIMEOUT = 30
 
 def generate_short_id(length=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
-#+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-# CORE FORWARDING ENGINE
-#+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
+def should_skip(message, configs):
+    f_config = configs.get('filters', {})
+    if not message: return True
+    if message.empty or message.service: return True
+    
+    if not f_config.get('text', True) and not message.media: return True
+    if message.photo and not f_config.get('photo', True): return True
+    if message.video and not f_config.get('video', True): return True
+    if message.audio and not f_config.get('audio', True): return True
+    if message.voice and not f_config.get('voice', True): return True
+    if message.document and not f_config.get('document', True): return True
+    if message.sticker and not f_config.get('sticker', True): return True
+    if message.animation and not f_config.get('animation', True): return True
+    if message.poll and not f_config.get('poll', True): return True
+    return False
+
+def get_custom_caption(msg, caption_template):
+    if not caption_template or not msg:
+        return msg.caption.html if msg and msg.caption else ""
+
+    original_caption = ""
+    if msg.caption:
+        original_caption = msg.caption.html
+
+    if msg.media:
+        media = getattr(msg, msg.media.value, None)
+        if media:
+            file_name = getattr(media, 'file_name', '')
+            file_size = getattr(media, 'file_size', 0)
+            return caption_template.format(filename=file_name, size=get_size(file_size), caption=original_caption)
+    
+    # Fallback for text messages if caption template is used
+    return caption_template.format(filename="", size="", caption=original_caption)
 
 class WorkerManager:
-    def __init__(self, operator_clients, job_queue, sts, delay):
+    def __init__(self, operator_clients, job_queue, sts, configs):
         self.clients = deque(operator_clients)
         self.job_queue = job_queue
         self.sts = sts
-        self.delay_between_batches = delay
+        self.configs = configs
+        self.delay = configs.get('forward_delay', 0.5)
         self.cooldown_workers = {}
         self.is_cancelled = False
 
     async def start(self):
         logger.info(f"WorkerManager started with {len(self.clients)} workers.")
-        # Main loop now correctly waits for workers on cooldown
         while (self.job_queue or self.cooldown_workers) and not self.is_cancelled:
             self.check_cooldowns()
 
             if not self.clients:
-                # If no active workers, but some are on cooldown, wait
-                if self.cooldown_workers:
-                    await asyncio.sleep(1)
-                    continue
-                # If no active workers and none on cooldown, the task is done
-                else:
-                    break
-
+                await asyncio.sleep(1)
+                continue
+            
             active_client = self.clients.popleft()
+            
+            if not self.job_queue:
+                self.clients.append(active_client)
+                await asyncio.sleep(1)
+                continue
+
+            message_id_batch = self.job_queue.popleft()
 
             try:
-                await self.process_batch(active_client)
-                self.clients.append(active_client)  # Return worker to pool on success
-                if self.delay_between_batches > 0 and self.job_queue:
-                    await asyncio.sleep(self.delay_between_batches)
+                await self.process_messages_one_by_one(active_client, message_id_batch)
+                self.clients.append(active_client)
             except FloodWait as e:
                 cooldown_duration = e.value + 5
                 logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
+                self.job_queue.appendleft(message_id_batch)
             except Exception as e:
-                logger.error(f"Worker {active_client.me.first_name} failed with {type(e).__name__}. Putting on 10s cooldown.")
-                # On any other failure, put the worker on a short cooldown instead of discarding it
+                logger.error(f"Worker {active_client.me.first_name} failed: {type(e).__name__}. Cooldown for 10s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + 10
+                self.job_queue.appendleft(message_id_batch)
 
-    async def process_batch(self, client):
-        if not self.job_queue:
-            return
+    async def process_messages_one_by_one(self, client, message_ids):
+        messages = await client.get_messages(self.sts.FROM, message_ids)
+        
+        for i, message in enumerate(messages):
+            if self.is_cancelled:
+                remaining_ids = [msg.id for msg in messages[i:]]
+                if remaining_ids: self.job_queue.appendleft(remaining_ids)
+                return
 
-        message_batch = self.job_queue.popleft()
-        try:
-            await client.forward_messages(
-                chat_id=self.sts.TO,
-                from_chat_id=self.sts.FROM,
-                message_ids=message_batch
-            )
-            self.sts.add('total_files', len(message_batch))
-            self.sts.add('fetched', len(message_batch))
-        except Exception as e:
-            # If a batch fails, re-queue it and raise the error to trigger cooldown
-            self.sts.add('failed', len(message_batch))
-            self.sts.add('fetched', len(message_batch))
-            self.job_queue.appendleft(message_batch)
-            logger.error(f"Failed to process batch, re-queuing. Error: {e}")
-            raise e
+            self.sts.add('fetched', 1)
+            if should_skip(message, self.configs): continue
+            
+            try:
+                if self.configs.get('forward_tag', False):
+                    await client.forward_messages(chat_id=self.sts.TO, from_chat_id=self.sts.FROM, message_ids=message.id)
+                else:
+                    await client.copy_message(
+                        chat_id=self.sts.TO,
+                        from_chat_id=self.sts.FROM,
+                        message_id=message.id,
+                        caption=get_custom_caption(message, self.configs.get('caption')),
+                        reply_markup=parse_buttons(self.configs.get('button'))
+                    )
+                
+                self.sts.add('total_files', 1)
+                if self.delay > 0: await asyncio.sleep(self.delay)
+
+            except FloodWait as e:
+                remaining_ids = [msg.id for msg in messages[i:]]
+                self.job_queue.appendleft(remaining_ids)
+                self.sts.add('fetched', -1)
+                raise e
+            except Exception as e:
+                logger.error(f"Failed to process message {message.id}. Error: {e}")
+                self.sts.add('failed', 1)
 
     def check_cooldowns(self):
         now = asyncio.get_running_loop().time()
         ready_workers = [w for w, end in self.cooldown_workers.items() if now >= end]
         for worker in ready_workers:
-            logger.info(f"Worker {worker.me.first_name} cooldown finished. Returning to active pool.")
+            logger.info(f"Worker {worker.me.first_name} cooldown finished.")
             self.clients.append(worker)
             del self.cooldown_workers[worker]
 
@@ -102,10 +149,7 @@ class WorkerManager:
 
 async def resilient_start_clone(config):
     try:
-        client = await asyncio.wait_for(
-            start_clone_bot(CLIENT.client(config), config),
-            timeout=OPERATOR_START_TIMEOUT
-        )
+        client = await asyncio.wait_for(start_clone_bot(CLIENT.client(config), config), timeout=OPERATOR_START_TIMEOUT)
         return client, None
     except asyncio.TimeoutError:
         return None, f"Timed out after {OPERATOR_START_TIMEOUT}s"
@@ -121,70 +165,62 @@ async def pub_(bot, cb: CallbackQuery):
     frwd_id = cb.data.split("_")[2]
     session = temp.FORWARD_SESSIONS.get(frwd_id)
     if not session:
-        return await cb.message.edit("This task has expired.")
+        return await cb.message.edit("This task has expired or is invalid.")
 
     await cb.answer()
     m = await cb.message.edit("`Initializing...`")
     operator_clients = []
-
+    
     try:
+        user_configs = await db.get_configs(user_id)
         operator_configs = await db.get_bots(user_id)
-        if not operator_configs:
-            raise ValueError("No Operator Bots/Userbots found in your settings.")
+        if not operator_configs: raise ValueError("No Operator Bots/Userbots found in your settings.")
 
         await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
-        start_tasks = [resilient_start_clone(config) for config in operator_configs]
-        results = await asyncio.gather(*start_tasks)
+        results = await asyncio.gather(*[resilient_start_clone(c) for c in operator_configs])
         
         operator_clients = [client for client, error in results if client]
         if not operator_clients:
-            errors = [error for client, error in results if error]
-            error_summary = ". ".join(set(errors)) if errors else "Unknown reason."
-            raise ValueError(f"All operators failed to start. Common error: {error_summary}")
+            errors = ". ".join(set(e for c, e in results if e))
+            raise ValueError(f"All operators failed to start. Error: {errors or 'Unknown'}")
 
         await m.edit(f"`Step 2/4: Verifying channel access...`")
         try:
             await operator_clients[0].get_chat(session['from_chat_id'])
             await operator_clients[0].get_chat(session['to_chat_id'])
-        except Exception as e:
-            raise ValueError(f"Operator could not access a required chat.\n\n**Error:** `{e}`")
+        except Exception as e: raise ValueError(f"Operator could not access a required chat.\nError: `{e}`")
 
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-
-        await m.edit("`Step 3/4: Populating batch queue...`")
+        
+        await m.edit("`Step 3/4: Populating job queue...`")
         start_id, end_id = min(sts.start_id, sts.end_id), max(sts.start_id, sts.end_id)
         job_queue = deque(
             list(range(i, min(i + BATCH_SIZE, end_id + 1)))
             for i in range(start_id, end_id + 1, BATCH_SIZE)
         )
 
-        temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m}}
+        temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m, "start_time": sts.get('start')}}
         temp.lock[user_id] = True
 
-        await m.edit(f"`Step 4/4: Deploying workers...`")
-        
-        reporter_task = asyncio.create_task(edit_progress(m, sts, sts.get('start')))
-        
-        user_settings = await db.get_configs(user_id)
-        delay = user_settings.get('forward_delay', 0)
-        manager = WorkerManager(operator_clients, job_queue, sts, delay)
-        
+        text, buttons = progress_message_content(sts, sts.get('start'), frwd_id)
+        await m.edit(text, reply_markup=buttons)
+
+        reporter_task = asyncio.create_task(edit_progress(m, sts))
+        manager = WorkerManager(operator_clients, job_queue, sts, user_configs)
         cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
+        
         await manager.start()
 
     except Exception as e:
         logger.error(f"Task failed: {e}", exc_info=True)
         await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
     finally:
-        if 'reporter_task' in locals() and not reporter_task.done(): reporter_task.cancel()
-        if 'cancel_task' in locals() and not cancel_task.done(): cancel_task.cancel()
-
-        if 'sts' in locals():
-            await edit_progress(m, sts, sts.get('start'), done=True)
+        if 'reporter_task' in locals(): reporter_task.cancel()
+        if 'cancel_task' in locals(): cancel_task.cancel()
+        if 'sts' in locals(): await edit_progress(m, sts, done=True)
 
         logger.info("Cleaning up resources...")
-        stop_tasks = [client.stop() for client in operator_clients if client.is_connected]
-        await asyncio.gather(*stop_tasks, return_exceptions=True)
+        await asyncio.gather(*[client.stop() for client in operator_clients if client.is_connected], return_exceptions=True)
         
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
@@ -199,9 +235,14 @@ async def cancel_checker(frwd_id, manager):
             break
         await asyncio.sleep(1)
 
-#+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-# USER COMMANDS & INTERFACE HANDLERS
-#+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
+@Client.on_callback_query(filters.regex(r'^cancel_task_'))
+async def cancel_task_cb(bot, cb):
+    task_id = cb.data.split("_")[-1]
+    temp.CANCEL[task_id] = True
+    await cb.answer("Cancelling task... Please wait.", show_alert=True)
+    try: await cb.message.edit_reply_markup(None)
+    except MessageNotModified: pass
+
 @Client.on_message(filters.private & filters.command(['start']))
 async def start(client, message):
     user = message.from_user
@@ -239,7 +280,7 @@ def parse_message_input(message):
 @Client.on_message(filters.private & filters.command(["fwd", "forward"]))
 async def forward_command_handler(bot, message):
     user_id = message.from_user.id
-    if temp.lock.get(user_id): return await message.reply("A task is in progress.")
+    if temp.lock.get(user_id): return await message.reply("A task is in progress. Use /tasks to manage it.")
     if not await db.get_bots(user_id): return await message.reply("No bots found. Add one in `/settings`.")
     if not await db.get_user_channels(user_id): return await message.reply("No target channels found. Add one in `/settings`.")
 
@@ -266,36 +307,26 @@ async def range_menu_handler(bot: Client, query: CallbackQuery):
         action, session_id = parts[1], parts[-1]
         session = temp.RANGE_SESSIONS.get(session_id)
         if not session or session.get('user_id') != user_id: return await query.answer("Session expired.", show_alert=True)
+        
+        message_to_edit = await bot.get_messages(user_id, session['range_message_id'])
 
         if action == "confirm":
-            await query.message.delete()
+            await message_to_edit.delete()
             await show_final_confirmation(bot, query, session_id)
-        elif action == "all":
-            await query.answer("Finding last message...", show_alert=False)
-            bots = await db.get_bots(user_id)
-            if not bots: return await query.answer("No bots to perform this action.", show_alert=True)
-            try:
-                async with CLIENT.client(bots[0]) as temp_client:
-                    async for last_message in temp_client.get_chat_history(session['from_chat_id'], limit=1):
-                        session.update({'start_id': 1, 'end_id': last_message.id})
-                        await update_range_message(bot, session_id, message_to_edit=query.message)
-                        return await query.answer(f"Range set: 1 -> {last_message.id}")
-                await query.answer("No messages found.", show_alert=True)
-            except Exception as e:
-                await query.answer(f"Error: {e}", show_alert=True)
         elif action == "cancel":
             temp.RANGE_SESSIONS.pop(session_id, None)
-            await query.message.delete()
+            await message_to_edit.delete()
             await bot.send_message(user_id, "Cancelled.")
         elif action == "edit":
             part = "start" if parts[2] == "start" else "end"
-            prompt = await query.message.edit_text(f"Send the new **{part}** message ID.")
+            prompt = await message_to_edit.edit_text(f"Send the new **{part}** message ID.")
             temp.USER_STATES[user_id] = {"state": "awaiting_range_edit", "session_id": session_id, "part_to_edit": part, "prompt_message_id": prompt.id}
         elif action == "swap":
             session['start_id'], session['end_id'] = session['end_id'], session['start_id']
-            await update_range_message(bot, session_id, message_to_edit=query.message)
+            await update_range_message(bot, session_id)
             await query.answer("Swapped.")
     except Exception as e:
+        logger.error(f"Range menu error: {e}")
         await query.answer(f"Error: {e}", show_alert=True)
 
 async def show_final_confirmation(bot, query, session_id):
@@ -320,59 +351,8 @@ async def show_final_confirmation(bot, query, session_id):
             [InlineKeyboardButton('« Cancel', callback_data="close_btn")]
         ]))
 
-@Client.on_message(filters.private & filters.command(['settings']))
-async def settings_entry(client, message):
-    if temp.lock.get(message.from_user.id): return await message.reply("A task is in progress.")
-    await message.reply_photo(
-        photo=random.choice(SYD), caption="<b>֎ Settings ֎</b>",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]
-        ])
-    )
-
-@Client.on_callback_query(filters.regex(r'^settings'))
-async def settings_query_handler(bot, query):
-    await query.answer()
-    user_id = query.from_user.id
-    if temp.lock.get(user_id): return await query.answer("A task is in progress.", show_alert=True)
-    try:
-        parts = query.data.split("#")
-        menu, *args = parts[1].split('_', 1)
-        value = args[0] if args else None
-        
-        if menu == "main": await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')]]))
-        elif menu == "bots": await list_bots(bot, user_id, message=query.message)
-        elif menu == "channels": await list_channels(bot, user_id, message=query.message)
-        elif menu == "addbot": await prompt_for_input(bot, query, user_id, "awaiting_bot_token", "Send the bot token.")
-        elif menu == "adduserbot": await prompt_for_input(bot, query, user_id, "awaiting_user_session", "Send the session string.")
-        elif menu == "addbots": await prompt_for_input(bot, query, user_id, "awaiting_bots_bulk", "Send a list of bot tokens, separated by spaces.")
-        elif menu == "addusers": await prompt_for_input(bot, query, user_id, "awaiting_users_bulk", "Send a list of session strings, separated by spaces.")
-        elif menu == "addchannel": await prompt_for_input(bot, query, user_id, "awaiting_channel_forward", "Forward a message from the target chat.")
-        elif menu == "editbot": await show_bot_details(query.message, user_id, int(value))
-        elif menu == "removebot": await remove_and_go_back(bot, query, user_id, db.remove_bot, int(value), "Bot removed.", 'bots')
-        elif menu == "editchannels": await show_channel_details(query.message, user_id, int(value))
-        elif menu == "removechannel": await remove_and_go_back(bot, query, user_id, db.remove_channel, int(value), "Channel removed.", 'channels')
-    except Exception as e:
-        logger.error(f"Error in settings: {e}", exc_info=True)
-
-@Client.on_message(filters.private & filters.command(["forwardelay", "fd"]))
-async def forward_delay(client: Client, message: Message):
-    user_id = message.from_user.id
-    if (await db.get_ban_status(user_id))["is_banned"]: return await message.reply_text("Access denied.")
-    user_configs = await db.get_configs(user_id)
-    delay = user_configs.get('forward_delay', 0)
-    if len(message.command) < 2: 
-        return await message.reply_text(f"<b>Batch Delay:</b> `{delay}s`\n\nTo change, use `/forwardelay [seconds]`.")
-    try:
-        new_delay = float(message.command[1])
-        if new_delay < 0: return await message.reply_text("Delay must be a positive number.")
-        await update_configs(user_id, 'forward_delay', new_delay)
-        await message.reply_text(f"Batch delay updated to **{new_delay}s**.")
-    except ValueError: await message.reply_text("Invalid number.")
-    except Exception as e: await message.reply_text(f"Error: {e}")
-
 @Client.on_message(filters.private & filters.incoming & ~filters.command([
-    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd"
+    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd", "tasks"
 ]))
 async def universal_message_handler(bot: Client, message: Message):
     user_id = message.from_user.id
@@ -387,23 +367,7 @@ async def universal_message_handler(bot: Client, message: Message):
     state_type = state.get("state")
     temp.USER_STATES.pop(user_id, None)
 
-    if state_type in ["awaiting_bot_token", "awaiting_user_session", "awaiting_bots_bulk", "awaiting_users_bulk", "awaiting_channel_forward"]:
-        if state_type == "awaiting_bot_token":
-            if await CLIENT.add_bot(message): await list_bots(bot, user_id, as_new=True, message=message)
-        elif state_type == "awaiting_user_session":
-            if await CLIENT.add_session(message): await list_bots(bot, user_id, as_new=True, message=message)
-        elif state_type == "awaiting_bots_bulk":
-            if await CLIENT.add_bots_bulk(message): await list_bots(bot, user_id, as_new=True, message=message)
-        elif state_type == "awaiting_users_bulk":
-            if await CLIENT.add_sessions_bulk(message): await list_bots(bot, user_id, as_new=True, message=message)
-        elif state_type == "awaiting_channel_forward":
-            if message.forward_from_chat:
-                await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
-                await message.reply("✅ Channel added.")
-                await list_channels(bot, user_id, as_new=True, message=message)
-            else:
-                await message.reply("Not a valid forwarded message.")
-    elif state_type == 'awaiting_source':
+    if state_type == 'awaiting_source':
         from_chat, end_id, error = parse_message_input(message)
         if error: return await message.reply(error)
         to_chat_id = state['to_chat_id']
@@ -411,10 +375,12 @@ async def universal_message_handler(bot: Client, message: Message):
         from_title = "Private Chat"
         try:
             async with CLIENT.client(bots[0]) as temp_client:
-                from_title = (await temp_client.get_chat(from_chat)).title
+                chat_info = await temp_client.get_chat(from_chat)
+                from_title = chat_info.title
         except Exception as e:
             logger.warning(f"Could not get chat title: {e}")
         await start_range_selection(bot, state['command_message'], from_chat, from_title, to_chat_id, 1, end_id)
+    
     elif state_type == 'awaiting_range_edit':
         session_id = state["session_id"]
         session = temp.RANGE_SESSIONS.get(session_id)
@@ -425,49 +391,6 @@ async def universal_message_handler(bot: Client, message: Message):
             await message.delete()
             await update_range_message(bot, session_id)
         except ValueError: await message.reply_text("Not a valid ID.")
-
-async def prompt_for_input(bot, query, user_id, state, text):
-    prompt = await query.message.edit_text(f"{text}\n\n/cancel - to abort.")
-    temp.USER_STATES[user_id] = {"state": state, "prompt_message_id": prompt.id, "is_settings": True}
-
-async def remove_and_go_back(bot, query, user_id, remove_func, item_id, success_text, back_menu):
-    await remove_func(user_id, item_id)
-    await query.message.edit_text(success_text)
-    await asyncio.sleep(2)
-    if back_menu == 'bots': await list_bots(bot, user_id, message=query.message)
-    elif back_menu == 'channels': await list_channels(bot, user_id, message=query.message)
-
-async def list_bots(bot, user_id, message=None, as_new=False):
-    bots = await db.get_bots(user_id)
-    buttons = [[InlineKeyboardButton(b['name'], callback_data=f"settings#editbot_{b['id']}")] for b in bots]
-    buttons.extend([
-        [InlineKeyboardButton('+ Add', callback_data="settings#addbot"), InlineKeyboardButton('+ Add User', callback_data="settings#adduserbot")],
-        [InlineKeyboardButton('+ Add Many', callback_data="settings#addbots_bulk"), InlineKeyboardButton('+ Add Many Users', callback_data="settings#addusers_bulk")],
-        [InlineKeyboardButton('« Back', callback_data="settings#main")]
-    ])
-    text = f"<b>֎ Bots & Userbots ({len(bots)}) ֎</b>"
-    if as_new: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-    else: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def list_channels(bot, user_id, message=None, as_new=False):
-    channels = await db.get_user_channels(user_id)
-    buttons = [[InlineKeyboardButton(f"● {c['title']}", callback_data=f"settings#editchannels_{c['chat_id']}")] for c in channels]
-    buttons += [[InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")], [InlineKeyboardButton('« Back', callback_data="settings#main")]]
-    text = f"<b>֎ Target Channels ({len(channels)}) ֎</b>"
-    if as_new: await bot.send_photo(chat_id=user_id, photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-    else: await message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_bot_details(message, user_id, bot_id):
-    _bot = await db.get_bot(user_id, bot_id)
-    uname = f"@{_bot['username']}" if _bot.get('username') else "N/A"
-    buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removebot_{bot_id}")], [InlineKeyboardButton('« Back', callback_data="settings#bots")]]
-    TEXT = Translation.BOT_DETAILS if _bot['is_bot'] else Translation.USER_DETAILS
-    await message.edit_caption(caption=TEXT.format(_bot['name'], bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
-
-async def show_channel_details(message, user_id, chat_id):
-    chat = await db.get_channel_details(user_id, int(chat_id))
-    buttons = [[InlineKeyboardButton('- Remove', callback_data=f"settings#removechannel_{chat_id}")], [InlineKeyboardButton('« Back', callback_data="settings#channels")]]
-    await message.edit_caption(caption=f"<b>Channel:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
