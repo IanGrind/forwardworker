@@ -47,8 +47,8 @@ class STS:
     def store(self, From, to, start_id, end_id):
         self.data[self.id] = {
             "id": self.id, "FROM": From, 'TO': to, 'total_files': 0,
-            'start_id': start_id, 'end_id': end_id, 'fetched': 0, 
-            'failed': 0, 'total': abs(end_id - start_id) + 1, 
+            'start_id': start_id, 'end_id': end_id, 'fetched': 0,
+            'failed': 0, 'total': abs(end_id - start_id) + 1,
             'start': time.time(), 'status': 'running'
         }
         return self.get(full=True)
@@ -57,7 +57,7 @@ class STS:
         values = self.data.get(self.id)
         if not values: return None
         if not full: return values.get(value)
-        
+
         for k, v in values.items(): setattr(self, k, v)
         return self
 
@@ -82,7 +82,7 @@ async def start_range_selection(bot, message: Message, from_chat_id, from_title,
 async def update_range_message(bot, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
-    
+
     try:
         message_to_edit = await bot.get_messages(session['user_id'], session['range_message_id'])
     except Exception:
@@ -90,10 +90,10 @@ async def update_range_message(bot, session_id):
         return
 
     text = Translation.RANGE_SELECTION_TXT.format(
-        start=min(session['start_id'], session['end_id']), 
+        start=min(session['start_id'], session['end_id']),
         end=max(session['start_id'], session['end_id'])
     )
-    
+
     buttons = [
         [InlineKeyboardButton(f"Range: {min(session['start_id'], session['end_id'])} ➔ {max(session['start_id'], session['end_id'])}", callback_data="noop")],
         [InlineKeyboardButton("✎ Edit Start", callback_data=f"range_edit_start_{session_id}"),
@@ -102,7 +102,7 @@ async def update_range_message(bot, session_id):
         [InlineKeyboardButton("✓ Confirm", callback_data=f"range_confirm_{session_id}")],
         [InlineKeyboardButton("« Cancel", callback_data=f"range_cancel_{session_id}")]
     ]
-    
+
     try:
         await message_to_edit.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
@@ -111,10 +111,10 @@ async def update_range_message(bot, session_id):
 async def edit_progress(message, sts, done=False):
     task_id = sts.get('id')
     start_time = sts.get('start')
-    
+
     try:
         while not temp.CANCEL.get(task_id) and not done:
-            if not sts.verify(): break 
+            if not sts.verify(): break
             text, buttons = progress_message_content(sts, start_time, task_id)
             try:
                 await message.edit_text(text, reply_markup=buttons)
@@ -139,7 +139,7 @@ def progress_message_content(sts, start_time, task_id, done=False):
     failed = sts.get('failed')
     elapsed_time = time.time() - start_time
     if elapsed_time == 0: elapsed_time = 1
-    
+
     if done:
         status = "Completed" if not temp.CANCEL.get(task_id) else "Cancelled"
         text = (
@@ -152,11 +152,13 @@ def progress_message_content(sts, start_time, task_id, done=False):
     else:
         speed = fetched / elapsed_time
         percentage = (fetched * 100) / total if total > 0 else 0
-        eta = get_readable_time(int(((total - fetched) / speed) if speed > 0 else 0))
+        percentage = min(100.00, percentage) # Visually cap percentage at 100%
+
+        eta = get_readable_time(int(((total - fetched) / speed) if speed > 0 and fetched < total else 0))
         progress_bar = "▰" * math.floor(percentage / 10) + "▱" * (10 - math.floor(percentage / 10))
-        
+
         status_text = "Running..."
-        
+
         text = Translation.TEXT.format(
             status=status_text,
             fetched=fetched, total=total,
@@ -167,12 +169,12 @@ def progress_message_content(sts, start_time, task_id, done=False):
             percentage=f"{percentage:.2f}",
             eta=eta
         )
-        
+
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Status", callback_data=f"fwrdstatus_{task_id}")],
             [InlineKeyboardButton("✖️ Cancel Task ✖️", callback_data=f"cancel_task_{task_id}")]
         ])
-    
+
     return text, buttons
 
 def get_status_alert_text(sts, start_time):
@@ -183,10 +185,12 @@ def get_status_alert_text(sts, start_time):
     failed = sts.get('failed')
     elapsed_time = time.time() - start_time
     if elapsed_time == 0: elapsed_time = 1
-    
+
     speed = fetched / elapsed_time
     percentage = (fetched * 100) / total if total > 0 else 0
-    eta = get_readable_time(int(((total - fetched) / speed) if speed > 0 else 0))
+    percentage = min(100.00, percentage)
+
+    eta = get_readable_time(int(((total - fetched) / speed) if speed > 0 and fetched < total else 0))
 
     return Translation.STATUS_ALERT.format(
         fetched=fetched, total=total,
