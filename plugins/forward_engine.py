@@ -10,7 +10,7 @@ from collections import deque
 from database import db
 from config import Config, temp
 from translation import Translation
-from .utils import (start_range_selection, update_range_message, STS, 
+from .utils import (start_range_selection, update_range_message, STS,
                     edit_progress, get_size, progress_message_content, get_status_alert_text)
 from .parser import parse_buttons
 from .test import CLIENT, start_clone_bot
@@ -20,7 +20,7 @@ from pyrogram.errors import FloodWait, MessageNotModified
 
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
-BATCH_SIZE = 100 
+BATCH_SIZE = 100
 OPERATOR_START_TIMEOUT = 30
 
 def generate_short_id(length=8):
@@ -30,7 +30,7 @@ def should_skip(message, configs):
     f_config = configs.get('filters', {})
     if not message: return True
     if message.empty or message.service: return True
-    
+
     if message.text and not message.media and not f_config.get('text', True): return True
     if message.photo and not f_config.get('photo', True): return True
     if message.video and not f_config.get('video', True): return True
@@ -54,7 +54,7 @@ def get_custom_caption(msg, caption_template):
             file_name = getattr(media, 'file_name', '')
             file_size = getattr(media, 'file_size', 0)
             return caption_template.format(filename=file_name, size=get_size(file_size), caption=original_caption)
-    
+
     return caption_template.format(filename="", size="", caption=original_caption)
 
 class WorkerManager:
@@ -74,51 +74,54 @@ class WorkerManager:
             if not self.clients:
                 await asyncio.sleep(1)
                 continue
+
             active_client = self.clients.popleft()
             if not self.job_queue:
                 self.clients.append(active_client)
                 await asyncio.sleep(1)
                 continue
+
             message_id_batch = self.job_queue.popleft()
+
             try:
-                await self.process_messages_one_by_one(active_client, message_id_batch)
+                await self.process_batch(active_client, message_id_batch)
                 self.clients.append(active_client)
             except FloodWait as e:
                 cooldown_duration = e.value + 5
                 logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
-                self.job_queue.appendleft(message_id_batch)
             except Exception as e:
-                logger.error(f"Worker {active_client.me.first_name} failed: {type(e).__name__}. Cooldown for 10s.")
+                logger.error(f"Worker {active_client.me.first_name} had an unexpected failure: {type(e).__name__}. Re-queuing batch and putting worker on 10s cooldown.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + 10
                 self.job_queue.appendleft(message_id_batch)
 
-    async def process_messages_one_by_one(self, client, message_ids):
+    async def process_batch(self, client, message_ids):
         messages = await client.get_messages(self.sts.FROM, message_ids)
         for i, message in enumerate(messages):
             if self.is_cancelled:
                 remaining_ids = [msg.id for msg in messages[i:]]
                 if remaining_ids: self.job_queue.appendleft(remaining_ids)
                 return
+
             self.sts.add('fetched', 1)
-            if should_skip(message, self.configs): continue
+            if should_skip(message, self.configs):
+                continue
             try:
                 if self.configs.get('forward_tag', False):
                     await client.forward_messages(chat_id=self.sts.TO, from_chat_id=self.sts.FROM, message_ids=[message.id])
                 else:
                     await client.copy_message(
-                        chat_id=self.sts.TO,
-                        from_chat_id=self.sts.FROM,
-                        message_id=message.id,
+                        chat_id=self.sts.TO, from_chat_id=self.sts.FROM, message_id=message.id,
                         caption=get_custom_caption(message, self.configs.get('caption')),
                         reply_markup=parse_buttons(self.configs.get('button'))
                     )
                 self.sts.add('total_files', 1)
                 if self.delay > 0: await asyncio.sleep(self.delay)
             except FloodWait as e:
+                logger.info(f"FloodWait on msg {message.id}. Re-queuing remaining messages.")
                 remaining_ids = [msg.id for msg in messages[i:]]
-                self.job_queue.appendleft(remaining_ids)
-                self.sts.add('fetched', -1)
+                if remaining_ids: self.job_queue.appendleft(remaining_ids)
+                self.sts.add('fetched', -len(remaining_ids))
                 raise e
             except Exception as e:
                 logger.error(f"Failed to process message {message.id}. Error: {e}")
@@ -214,7 +217,7 @@ async def status_popup_cb(bot, cb):
     sts = STS(task_id).get(full=True)
     if not sts:
         return await cb.answer("This task has expired.", show_alert=True)
-    
+
     alert_text = get_status_alert_text(sts, sts.get('start'))
     await cb.answer(alert_text, show_alert=True)
 
@@ -336,7 +339,6 @@ async def universal_message_handler(bot: Client, message: Message):
     state = temp.USER_STATES.get(user_id)
     if not state: return
 
-    # Universal cancellation check
     if message.text and message.text.lower() == "/cancel":
         prompt_id = state.get("prompt_message_id")
         if prompt_id:
@@ -354,14 +356,12 @@ async def universal_message_handler(bot: Client, message: Message):
         except: pass
 
     state_type = state.get("state")
-    
-    # Forwarding Logic
+
     if state_type == 'awaiting_source':
         temp.USER_STATES.pop(user_id, None)
         from_chat, end_id, error = parse_message_input(message)
         if error: return await message.reply(error)
-        
-        # Clean up user's message
+
         await message.delete()
 
         to_chat_id = state['to_chat_id']
@@ -372,7 +372,7 @@ async def universal_message_handler(bot: Client, message: Message):
                 from_title = (await temp_client.get_chat(from_chat)).title
         except Exception as e:
             logger.warning(f"Could not get chat title for {from_chat}: {e}")
-        
+
         await start_range_selection(bot, state['command_message'], from_chat, from_title, to_chat_id, 1, end_id)
         return
 
@@ -389,10 +389,9 @@ async def universal_message_handler(bot: Client, message: Message):
         except ValueError: await message.reply_text("Not a valid ID.")
         return
 
-    # Settings Logic
     if not state.get("is_settings"): return
     temp.USER_STATES.pop(user_id, None)
-    
+
     sent_message = await message.reply_text("`Processing...`")
     if state_type == "awaiting_bot_token":
         if await CLIENT.add_bot(message): await list_bots(sent_message, user_id, as_new=True)
@@ -432,7 +431,7 @@ async def back_to_start(bot, query):
        caption=Translation.START_TXT.format(query.from_user.first_name),
        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Help', callback_data='help'), InlineKeyboardButton('About', callback_data='about')]])
     )
-    
+
 @Client.on_callback_query(filters.regex(r'^help'))
 async def helpcb(bot, query):
     await query.message.edit_caption(
