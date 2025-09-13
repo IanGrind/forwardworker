@@ -39,22 +39,44 @@ class Database:
         return [user['id'] async for user in users]
 
     async def get_configs(self, id):
+        # Default configuration for a new user
         default = {
-            'caption': None, 'duplicate': True, 'forward_tag': False, 'file_size': 0, 'size_limit': None,
-            'extension': None, 'keywords': None, 'protect': None, 'button': None, 'db_uri': None, 'forward_delay': 0.5,
-            'filters': {'poll': True, 'text': True, 'audio': True, 'voice': True, 'video': True, 'photo': True, 'document': True, 'animation': True, 'sticker': True}
+            'caption': None, 
+            'duplicate': True, 
+            'forward_tag': False, 
+            'file_size': 0, 
+            'size_limit': None,
+            'extension': None, 
+            'keywords': None, 
+            'protect': None, 
+            'button': None, 
+            'db_uri': None, 
+            'forward_delay': 0.5,
+            'filters': {
+                'poll': True, 'text': True, 'audio': True, 'voice': True, 
+                'video': True, 'photo': True, 'document': True, 
+                'animation': True, 'sticker': True
+            }
         }
         user = await self.col.find_one({'id': int(id)})
+        # If user exists, merge their saved configs with the default
         if user and 'configs' in user:
             user_configs = user['configs']
+            # Ensure nested 'filters' dictionary is also merged
+            default_filters = default['filters']
+            user_filters = user_configs.get('filters', {})
+            merged_filters = {**default_filters, **user_filters}
+            
+            # Merge top-level configs and the merged filters
             final_configs = {**default, **user_configs}
-            if 'filters' in user_configs:
-                final_configs['filters'] = {**default['filters'], **user_configs['filters']}
+            final_configs['filters'] = merged_filters
             return final_configs
+        
+        # Return default if user or configs do not exist
         return default
         
     async def update_configs(self, id, configs):
-        await self.col.update_one({'id': int(id)}, {'$set': {'configs': configs}})
+        await self.col.update_one({'id': int(id)}, {'$set': {'configs': configs}}, upsert=True)
 
     async def add_bot(self, datas):
        await self.bot.insert_one(datas)
@@ -87,4 +109,3 @@ class Database:
 
     async def get_user_channels(self, user_id):
        return [c async for c in self.chl.find({"user_id": int(user_id)})]
-
