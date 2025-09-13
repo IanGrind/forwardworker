@@ -174,7 +174,7 @@ async def pub_(bot, cb: CallbackQuery):
         await m.edit(f"`Step 2/4: Verifying channel access for each operator...`")
         
         valid_operators = []
-        failed_operators = []
+        failed_operator_details = []
 
         for client in all_operator_clients:
             try:
@@ -182,11 +182,13 @@ async def pub_(bot, cb: CallbackQuery):
                 await client.get_chat(session['to_chat_id'])
                 valid_operators.append(client)
             except Exception as e:
-                logger.warning(f"Operator {client.me.first_name} failed access check: {e}")
-                failed_operators.append(client.me.first_name)
+                error_name = type(e).__name__
+                logger.warning(f"Operator {client.me.first_name} failed access check: {error_name}")
+                failed_operator_details.append(f"`{client.me.first_name}` ({error_name})")
         
-        if failed_operators:
-            await bot.send_message(user_id, f"⚠️ **Warning:** The following operators could not access one or both chats and will be skipped:\n`{', '.join(failed_operators)}`")
+        if failed_operator_details:
+            details_str = "\n- ".join(failed_operator_details)
+            await bot.send_message(user_id, f"⚠️ **Warning:** The following operators could not access the required chats and will be skipped:\n- {details_str}")
 
         if not valid_operators:
             raise ValueError("No operators could access both the source and target chats. Please check their permissions and memberships.")
