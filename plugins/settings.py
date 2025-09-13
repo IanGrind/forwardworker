@@ -134,70 +134,7 @@ async def settings_query_handler(bot, query):
             await display_button_menu(query.message, user_id)
             
     except Exception as e:
-        print(f"Error in settings query handler: {e}")
-
-# +~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-# Message Handler for Settings Input
-# +~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-@Client.on_message(filters.private & filters.incoming & ~filters.command([
-    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd", "tasks"
-]))
-async def settings_message_handler(bot: Client, message: Message):
-    """Handles text/forwarded inputs for the settings menu."""
-    user_id = message.from_user.id
-    state = temp.USER_STATES.get(user_id)
-    if not state or not state.get("is_settings"):
-        return
-
-    # Handle cancellation
-    if message.text and message.text.lower() == "/cancel":
-        prompt_id = state.get("prompt_message_id")
-        if prompt_id:
-            try:
-                await bot.delete_messages(user_id, prompt_id)
-                await message.delete()
-            except Exception: pass
-        temp.USER_STATES.pop(user_id, None)
-        await bot.send_message(user_id, "Cancelled.")
-        return
-
-    prompt_id = state.get("prompt_message_id")
-    if prompt_id:
-        try: await bot.delete_messages(user_id, prompt_id)
-        except Exception: pass
-    
-    state_type = state.get("state")
-    temp.USER_STATES.pop(user_id, None) 
-    
-    sent_message = await message.reply_text("`Processing...`")
-
-    if state_type == "awaiting_bot_token":
-        if await CLIENT.add_bot(message): await list_bots(sent_message, user_id, as_new=True)
-    elif state_type == "awaiting_user_session":
-        if await CLIENT.add_session(message): await list_bots(sent_message, user_id, as_new=True)
-    elif state_type == "awaiting_bots_bulk":
-        if await CLIENT.add_bots_bulk(message): await list_bots(sent_message, user_id, as_new=True)
-    elif state_type == "awaiting_users_bulk":
-        if await CLIENT.add_sessions_bulk(message): await list_bots(sent_message, user_id, as_new=True)
-    elif state_type == "awaiting_channel_forward":
-        if message.forward_from_chat:
-            await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
-            await message.reply("✅ Channel added.")
-            await list_channels(sent_message, user_id, as_new=True)
-        else:
-            await message.reply("Not a valid forwarded message.")
-    elif state_type == "awaiting_caption":
-        await update_configs(user_id, 'caption', message.text)
-        await message.reply("Caption updated successfully.")
-    elif state_type == "awaiting_button":
-        if parse_buttons(message.text):
-            await update_configs(user_id, 'button', message.text)
-            await message.reply("Button layout updated successfully.")
-        else:
-            await message.reply("Invalid button format.")
-
-    await sent_message.delete()
-
+        logger.error(f"Error in settings query handler: {e}", exc_info=True)
 
 # +~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
 # UI & Helper Functions
