@@ -97,4 +97,3 @@ Set a custom delay (in seconds) between each message forward. This can help prev
 <b>Usage:</b> `/forwardelay [seconds]`
 <b>Example:</b> `/forwardelay 0.5`"""
 
-}
