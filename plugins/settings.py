@@ -1,7 +1,7 @@
 import asyncio
 import random
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import temp
 from database import db
@@ -56,8 +56,6 @@ async def settings_query_handler(bot, query):
     try:
         parts = query.data.split("#")
         menu = parts[1]
-        
-        # Sub-menu navigation
         value = parts[2] if len(parts) > 2 else None
 
         if menu == "main":
@@ -141,12 +139,26 @@ async def settings_query_handler(bot, query):
 # +~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
 # Message Handler for Settings Input
 # +~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+~+
-@Client.on_message(filters.private & ~filters.command LACK OF &filters.incoming)
+@Client.on_message(filters.private & filters.incoming & ~filters.command([
+    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd", "tasks"
+]))
 async def settings_message_handler(bot: Client, message: Message):
     """Handles text/forwarded inputs for the settings menu."""
     user_id = message.from_user.id
     state = temp.USER_STATES.get(user_id)
     if not state or not state.get("is_settings"):
+        return
+
+    # Handle cancellation
+    if message.text and message.text.lower() == "/cancel":
+        prompt_id = state.get("prompt_message_id")
+        if prompt_id:
+            try:
+                await bot.delete_messages(user_id, prompt_id)
+                await message.delete()
+            except Exception: pass
+        temp.USER_STATES.pop(user_id, None)
+        await bot.send_message(user_id, "Cancelled.")
         return
 
     prompt_id = state.get("prompt_message_id")
@@ -157,8 +169,6 @@ async def settings_message_handler(bot: Client, message: Message):
     state_type = state.get("state")
     temp.USER_STATES.pop(user_id, None) 
     
-    # Create a dummy message object to pass to list_bots/list_channels
-    # This avoids errors when trying to edit a message that doesn't exist.
     sent_message = await message.reply_text("`Processing...`")
 
     if state_type == "awaiting_bot_token":
@@ -186,7 +196,6 @@ async def settings_message_handler(bot: Client, message: Message):
         else:
             await message.reply("Invalid button format.")
 
-    # Clean up the "Processing..." message
     await sent_message.delete()
 
 
@@ -220,7 +229,6 @@ async def list_bots(message, user_id, as_new=False):
     ])
     text = f"<b>֎ Bots & Userbots ({len(bots)}) ֎</b>\n\nManage your operator bots and userbots here."
     
-    # If called after adding a bot, send a new photo message instead of editing.
     if as_new:
         await message.reply_photo(photo=random.choice(SYD), caption=text, reply_markup=InlineKeyboardMarkup(buttons))
     else:
