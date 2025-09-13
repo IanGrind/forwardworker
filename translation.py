@@ -88,4 +88,3 @@ Forwarded: {forwarded} | Failed: {failed}
 Skipped: {skipped} | Status: {status}
 ETA: {eta}"""
 
-}
