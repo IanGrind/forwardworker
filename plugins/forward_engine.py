@@ -154,9 +154,7 @@ async def robust_access_check(client, chat_id):
     This helps "warm up" the client's session cache.
     """
     try:
-        # A lightweight check first
         await client.get_chat(chat_id)
-        # A more forceful check to ensure history access is possible
         async for _ in client.get_chat_history(chat_id, limit=1):
             pass
         return True, None
@@ -239,7 +237,16 @@ async def pub_(bot, cb: CallbackQuery):
         if 'sts' in locals(): await edit_progress(m, sts, done=True)
         
         logger.info("Cleaning up resources...")
-        await asyncio.gather(*[client.stop() for client in all_operator_clients if client.is_connected], return_exceptions=True)
+        # Create a list of clients to stop that were actually started
+        clients_to_stop = valid_operators if 'valid_operators' in locals() else []
+        if 'failed_operator_details' in locals():
+            # This part is a bit tricky, we need to find the client objects for the failed ones
+            failed_names = [name.split('`')[1] for name in failed_operator_details]
+            for client in all_operator_clients:
+                if client.me.first_name in failed_names and client not in clients_to_stop:
+                    clients_to_stop.append(client)
+
+        await asyncio.gather(*[client.stop() for client in clients_to_stop if client.is_connected], return_exceptions=True)
         
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
