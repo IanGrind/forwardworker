@@ -1,5 +1,3 @@
-# iangrind/forwardworker/forwardworker-1ff680b8c32922eb74e103a193e108a8d299c7bc/plugins/test.py
-
 import os
 import re 
 import sys
