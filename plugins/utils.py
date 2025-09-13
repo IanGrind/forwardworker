@@ -68,8 +68,7 @@ class STS:
 async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id):
     session_id = str(uuid4())
     range_msg = await bot.send_message(
-        chat_id=message.chat.id, text="`Calculating...`",
-        reply_to_message_id=message.id
+        chat_id=message.chat.id, text="`Calculating...`"
     )
     temp.RANGE_SESSIONS[session_id] = {
         'user_id': message.chat.id,
@@ -84,8 +83,11 @@ async def update_range_message(bot, session_id):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
     
-    message_to_edit = await bot.get_messages(session['user_id'], session['range_message_id'])
-    if not message_to_edit: return
+    try:
+        message_to_edit = await bot.get_messages(session['user_id'], session['range_message_id'])
+    except Exception:
+        logger.warning(f"Could not find message to edit for range session {session_id}")
+        return
 
     text = Translation.RANGE_SELECTION_TXT.format(
         start=min(session['start_id'], session['end_id']), 
