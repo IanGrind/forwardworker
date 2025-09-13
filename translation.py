@@ -87,4 +87,14 @@ For multiple lines, use a new line in the message.
 Forwarded: {forwarded} | Failed: {failed}
 Skipped: {skipped} | Status: {status}
 ETA: {eta}"""
+  
+  FORWARDELAY_TXT = """<b>֎ Forward Delay ֎</b>
 
+Set a custom delay (in seconds) between each message forward. This can help prevent flood waits from Telegram.
+
+<b>Current Delay:</b> <code>{current_delay}</code> seconds
+
+<b>Usage:</b> `/forwardelay [seconds]`
+<b>Example:</b> `/forwardelay 0.5`"""
+
+}
