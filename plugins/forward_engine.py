@@ -158,22 +158,39 @@ async def pub_(bot, cb: CallbackQuery):
         return await cb.message.edit("This task has expired or is invalid.")
     await cb.answer()
     m = await cb.message.edit("`Initializing...`")
-    operator_clients = []
+    
+    all_operator_clients = []
+    
     try:
         user_configs = await db.get_configs(user_id)
         operator_configs = await db.get_bots(user_id)
         if not operator_configs: raise ValueError("No Operator Bots/Userbots found in your settings.")
+        
         await m.edit(f"`Step 1/4: Starting {len(operator_configs)} operator(s)...`")
         results = await asyncio.gather(*[resilient_start_clone(c) for c in operator_configs])
-        operator_clients = [client for client, error in results if client]
-        if not operator_clients:
-            errors = ". ".join(set(e for c, e in results if e))
-            raise ValueError(f"All operators failed to start. Error: {errors or 'Unknown'}")
-        await m.edit(f"`Step 2/4: Verifying channel access...`")
-        try:
-            await operator_clients[0].get_chat(session['from_chat_id'])
-            await operator_clients[0].get_chat(session['to_chat_id'])
-        except Exception as e: raise ValueError(f"Operator could not access a required chat.\nError: `{e}`")
+        
+        all_operator_clients = [client for client, error in results if client]
+        
+        await m.edit(f"`Step 2/4: Verifying channel access for each operator...`")
+        
+        valid_operators = []
+        failed_operators = []
+
+        for client in all_operator_clients:
+            try:
+                await client.get_chat(session['from_chat_id'])
+                await client.get_chat(session['to_chat_id'])
+                valid_operators.append(client)
+            except Exception as e:
+                logger.warning(f"Operator {client.me.first_name} failed access check: {e}")
+                failed_operators.append(client.me.first_name)
+        
+        if failed_operators:
+            await bot.send_message(user_id, f"⚠️ **Warning:** The following operators could not access one or both chats and will be skipped:\n`{', '.join(failed_operators)}`")
+
+        if not valid_operators:
+            raise ValueError("No operators could access both the source and target chats. Please check their permissions and memberships.")
+
         sts = STS(frwd_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
         await m.edit("`Step 3/4: Populating job queue...`")
         start_id, end_id = min(sts.start_id, sts.end_id), max(sts.start_id, sts.end_id)
@@ -183,12 +200,16 @@ async def pub_(bot, cb: CallbackQuery):
         )
         temp.ACTIVE_TASKS[user_id] = {frwd_id: {"process": m, "start_time": sts.get('start')}}
         temp.lock[user_id] = True
+        
+        await m.edit(f"`Step 4/4: Deploying {len(valid_operators)} valid worker(s)...`")
         text, buttons = progress_message_content(sts, sts.get('start'), frwd_id)
         await m.edit(text, reply_markup=buttons)
+
         reporter_task = asyncio.create_task(edit_progress(m, sts))
-        manager = WorkerManager(operator_clients, job_queue, sts, user_configs)
+        manager = WorkerManager(valid_operators, job_queue, sts, user_configs)
         cancel_task = asyncio.create_task(cancel_checker(frwd_id, manager))
         await manager.start()
+
     except Exception as e:
         logger.error(f"Task failed: {e}", exc_info=True)
         await m.edit(f"**TASK FAILED**\n\n**Reason:** `{e}`")
@@ -196,8 +217,10 @@ async def pub_(bot, cb: CallbackQuery):
         if 'reporter_task' in locals(): reporter_task.cancel()
         if 'cancel_task' in locals(): cancel_task.cancel()
         if 'sts' in locals(): await edit_progress(m, sts, done=True)
+        
         logger.info("Cleaning up resources...")
-        await asyncio.gather(*[client.stop() for client in operator_clients if client.is_connected], return_exceptions=True)
+        await asyncio.gather(*[client.stop() for client in all_operator_clients if client.is_connected], return_exceptions=True)
+        
         temp.FORWARD_SESSIONS.pop(frwd_id, None)
         temp.ACTIVE_TASKS.pop(user_id, None)
         temp.CANCEL.pop(frwd_id, None)
