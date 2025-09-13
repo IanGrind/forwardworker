@@ -90,6 +90,7 @@ class WorkerManager:
                 cooldown_duration = e.value + 5
                 logger.warning(f"Worker {active_client.me.first_name} hit FloodWait. Cooldown for {cooldown_duration}s.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + cooldown_duration
+                self.job_queue.appendleft(message_id_batch) # Re-queue the whole batch on FloodWait
             except Exception as e:
                 logger.error(f"Worker {active_client.me.first_name} had an unexpected failure: {type(e).__name__}. Re-queuing batch and putting worker on 10s cooldown.")
                 self.cooldown_workers[active_client] = asyncio.get_running_loop().time() + 10
@@ -118,11 +119,11 @@ class WorkerManager:
                 self.sts.add('total_files', 1)
                 if self.delay > 0: await asyncio.sleep(self.delay)
             except FloodWait as e:
-                logger.info(f"FloodWait on msg {message.id}. Re-queuing remaining messages.")
+                logger.info(f"FloodWait on msg {message.id}. Re-queuing remaining messages for this batch.")
                 remaining_ids = [msg.id for msg in messages[i:]]
                 if remaining_ids: self.job_queue.appendleft(remaining_ids)
                 self.sts.add('fetched', -len(remaining_ids))
-                raise e
+                raise e # Propagate to trigger cooldown
             except Exception as e:
                 logger.error(f"Failed to process message {message.id}. Error: {e}")
                 self.sts.add('failed', 1)
@@ -146,6 +147,22 @@ async def resilient_start_clone(config):
         return None, f"Timed out after {OPERATOR_START_TIMEOUT}s"
     except Exception as e:
         return None, str(e)
+
+async def robust_access_check(client, chat_id):
+    """
+    A more robust check to ensure a client can access a chat and its history.
+    This helps "warm up" the client's session cache.
+    """
+    try:
+        # A lightweight check first
+        await client.get_chat(chat_id)
+        # A more forceful check to ensure history access is possible
+        async for _ in client.get_chat_history(chat_id, limit=1):
+            pass
+        return True, None
+    except Exception as e:
+        return False, type(e).__name__
+
 
 @Client.on_callback_query(filters.regex(r'^start_public_'))
 async def pub_(bot, cb: CallbackQuery):
@@ -171,20 +188,21 @@ async def pub_(bot, cb: CallbackQuery):
         
         all_operator_clients = [client for client, error in results if client]
         
-        await m.edit(f"`Step 2/4: Verifying channel access for each operator...`")
+        await m.edit(f"`Step 2/4: Warming up sessions and verifying access...`")
         
         valid_operators = []
         failed_operator_details = []
 
         for client in all_operator_clients:
-            try:
-                await client.get_chat(session['from_chat_id'])
-                await client.get_chat(session['to_chat_id'])
+            source_ok, source_err = await robust_access_check(client, session['from_chat_id'])
+            target_ok, target_err = await robust_access_check(client, session['to_chat_id'])
+
+            if source_ok and target_ok:
                 valid_operators.append(client)
-            except Exception as e:
-                error_name = type(e).__name__
-                logger.warning(f"Operator {client.me.first_name} failed access check: {error_name}")
-                failed_operator_details.append(f"`{client.me.first_name}` ({error_name})")
+            else:
+                err_detail = source_err if not source_ok else target_err
+                logger.warning(f"Operator {client.me.first_name} failed access check: {err_detail}")
+                failed_operator_details.append(f"`{client.me.first_name}` ({err_detail})")
         
         if failed_operator_details:
             details_str = "\n- ".join(failed_operator_details)
