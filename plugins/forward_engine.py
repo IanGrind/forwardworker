@@ -154,11 +154,17 @@ async def robust_access_check(client, chat_id):
     This helps "warm up" the client's session cache.
     """
     try:
-        await client.get_chat(chat_id)
-        async for _ in client.get_chat_history(chat_id, limit=1):
+        # The key change is here: we get the full chat object
+        chat = await client.get_chat(chat_id)
+        
+        # Then we use the object's ID for the history check.
+        # This ensures we are using the most up-to-date access hash.
+        async for _ in client.get_chat_history(chat.id, limit=1):
             pass
         return True, None
     except Exception as e:
+        # Add more detailed logging to see the exact error
+        logger.error(f"Robust access check failed for chat {chat_id}: {e}", exc_info=True)
         return False, type(e).__name__
 
 
