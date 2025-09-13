@@ -210,7 +210,6 @@ async def cancel_checker(frwd_id, manager):
 
 @Client.on_callback_query(filters.regex(r'^fwrdstatus_'))
 async def status_popup_cb(bot, cb):
-    """Handles the real-time status pop-up button."""
     task_id = cb.data.split("_")[-1]
     sts = STS(task_id).get(full=True)
     if not sts:
@@ -328,6 +327,99 @@ async def show_final_confirmation(bot, query, session_id):
             [InlineKeyboardButton('✓ Start Forwarding', callback_data=f"start_public_{forward_id}")],
             [InlineKeyboardButton('« Cancel', callback_data="close_btn")]
         ]))
+
+@Client.on_message(filters.private & filters.incoming & ~filters.command([
+    "start", "restart", "r", "fwd", "forward", "settings", "forwardelay", "fd", "tasks"
+]))
+async def universal_message_handler(bot: Client, message: Message):
+    user_id = message.from_user.id
+    state = temp.USER_STATES.get(user_id)
+    if not state: return
+
+    # Universal cancellation check
+    if message.text and message.text.lower() == "/cancel":
+        prompt_id = state.get("prompt_message_id")
+        if prompt_id:
+            try:
+                await bot.delete_messages(user_id, prompt_id)
+                await message.delete()
+            except: pass
+        temp.USER_STATES.pop(user_id, None)
+        await bot.send_message(user_id, "Cancelled.")
+        return
+
+    prompt_id = state.get("prompt_message_id")
+    if prompt_id:
+        try: await bot.delete_messages(user_id, prompt_id)
+        except: pass
+
+    state_type = state.get("state")
+    
+    # Forwarding Logic
+    if state_type == 'awaiting_source':
+        temp.USER_STATES.pop(user_id, None)
+        from_chat, end_id, error = parse_message_input(message)
+        if error: return await message.reply(error)
+        
+        # Clean up user's message
+        await message.delete()
+
+        to_chat_id = state['to_chat_id']
+        bots = await db.get_bots(user_id)
+        from_title = "Private Chat"
+        try:
+            async with CLIENT.client(bots[0]) as temp_client:
+                from_title = (await temp_client.get_chat(from_chat)).title
+        except Exception as e:
+            logger.warning(f"Could not get chat title for {from_chat}: {e}")
+        
+        await start_range_selection(bot, state['command_message'], from_chat, from_title, to_chat_id, 1, end_id)
+        return
+
+    elif state_type == 'awaiting_range_edit':
+        temp.USER_STATES.pop(user_id, None)
+        session_id = state["session_id"]
+        session = temp.RANGE_SESSIONS.get(session_id)
+        if not session: return await message.reply_text("Session expired.")
+        try:
+            new_id = int(message.text)
+            session[f'{state["part_to_edit"]}_id'] = new_id
+            await message.delete()
+            await update_range_message(bot, session_id)
+        except ValueError: await message.reply_text("Not a valid ID.")
+        return
+
+    # Settings Logic
+    if not state.get("is_settings"): return
+    temp.USER_STATES.pop(user_id, None)
+    
+    sent_message = await message.reply_text("`Processing...`")
+    if state_type == "awaiting_bot_token":
+        if await CLIENT.add_bot(message): await list_bots(sent_message, user_id, as_new=True)
+    elif state_type == "awaiting_user_session":
+        if await CLIENT.add_session(message): await list_bots(sent_message, user_id, as_new=True)
+    elif state_type == "awaiting_bots_bulk":
+        if await CLIENT.add_bots_bulk(message): await list_bots(sent_message, user_id, as_new=True)
+    elif state_type == "awaiting_users_bulk":
+        if await CLIENT.add_sessions_bulk(message): await list_bots(sent_message, user_id, as_new=True)
+    elif state_type == "awaiting_channel_forward":
+        if message.forward_from_chat:
+            await db.add_channel(user_id, message.forward_from_chat.id, message.forward_from_chat.title, message.forward_from_chat.username)
+            await message.reply("✅ Channel added.")
+            await list_channels(sent_message, user_id, as_new=True)
+        else:
+            await message.reply("Not a valid forwarded message.")
+    elif state_type == "awaiting_caption":
+        await update_configs(user_id, 'caption', message.text)
+        await message.reply("Caption updated successfully.")
+    elif state_type == "awaiting_button":
+        if parse_buttons(message.text):
+            await update_configs(user_id, 'button', message.text)
+            await message.reply("Button layout updated successfully.")
+        else:
+            await message.reply("Invalid button format.")
+    await sent_message.delete()
+
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))
 async def close_callback(bot, query):
