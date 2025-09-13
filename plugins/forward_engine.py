@@ -56,7 +56,6 @@ def get_custom_caption(msg, caption_template):
             file_size = getattr(media, 'file_size', 0)
             return caption_template.format(filename=file_name, size=get_size(file_size), caption=original_caption)
     
-    # Fallback for text messages if caption template is used
     return caption_template.format(filename="", size="", caption=original_caption)
 
 class WorkerManager:
@@ -114,7 +113,8 @@ class WorkerManager:
             
             try:
                 if self.configs.get('forward_tag', False):
-                    await client.forward_messages(chat_id=self.sts.TO, from_chat_id=self.sts.FROM, message_ids=message.id)
+                    # CORRECTED: Pass message.id inside a list
+                    await client.forward_messages(chat_id=self.sts.TO, from_chat_id=self.sts.FROM, message_ids=[message.id])
                 else:
                     await client.copy_message(
                         chat_id=self.sts.TO,
